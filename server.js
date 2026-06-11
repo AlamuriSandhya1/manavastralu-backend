@@ -13,7 +13,7 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
 
-// ── CORS — allow frontend origins explicitly ──────────
+// ── CORS ──────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   "https://manavastralu.com",
   "https://www.manavastralu.com",
@@ -23,19 +23,27 @@ const ALLOWED_ORIGINS = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, curl)
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
     console.warn("⚠️  CORS blocked:", origin);
     callback(new Error("Not allowed by CORS"));
   },
-  credentials: true,
-  methods:     ["GET","POST","PUT","DELETE","OPTIONS"],
+  credentials:    true,
+  methods:        ["GET","POST","PUT","DELETE","OPTIONS"],
   allowedHeaders: ["Content-Type","Authorization"],
 }));
 
-// Handle preflight for all routes
-app.options("*", cors());
+// ✅ FIX — replaces app.options("*", cors()) which crashes newer Express
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    res.header("Access-Control-Allow-Origin",  req.headers.origin || "*");
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    res.header("Access-Control-Allow-Credentials", "true");
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 app.use(express.json());
 
@@ -60,15 +68,13 @@ const cloudStorage = new CloudinaryStorage({
 });
 const upload = multer({ storage: cloudStorage });
 
-// ── MongoDB connection string ─────────────────────────
+// ── MongoDB ───────────────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db";
 
-// ── Mongoose ──────────────────────────────────────────
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ Mongoose connected"))
   .catch(err => console.error("❌ Mongoose error:", err.message));
 
-// ── MongoDB Native client ─────────────────────────────
 const mongoClient = new MongoClient(MONGO_URI);
 let db;
 
@@ -93,7 +99,7 @@ const Product = require("./models/Product");
 const Order   = require("./models/Order");
 const User    = require("./models/User");
 
-// ── Email service (optional) ──────────────────────────
+// ── Email service ─────────────────────────────────────
 let sendCustomerEmail = async () => {};
 let sendAdminEmail    = async () => {};
 try {
@@ -113,7 +119,7 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "admin123";
 // ═══════════════════════════════════════════════════════
 //  HOME
 // ═══════════════════════════════════════════════════════
-app.get("/", (req, res) => res.json({ message: "Backend running" }));
+app.get("/", (req, res) => res.json({ message: "Backend running ✅" }));
 
 // ═══════════════════════════════════════════════════════
 //  AUTH
@@ -124,7 +130,8 @@ app.post("/api/auth/login", async (req, res) => {
     const user = await User.findOneAndUpdate(
       { email },
       { name, photo, lastLogin: new Date(),
-        $inc: { loginCount: 1 }, $setOnInsert: { createdAt: new Date() } },
+        $inc: { loginCount: 1 },
+        $setOnInsert: { createdAt: new Date() } },
       { upsert: true, new: true }
     );
     res.json({ success: true, user });
@@ -159,7 +166,8 @@ app.post("/login", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 app.get("/users", async (req, res) => {
   try {
-    const list = await usersCol().find({}, { projection: { password: 0 } }).toArray();
+    const list = await usersCol()
+      .find({}, { projection: { password: 0 } }).toArray();
     res.json(list);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -168,7 +176,11 @@ app.post("/save-address", async (req, res) => {
   try {
     const data = req.body;
     if (!data.email) return res.status(400).json({ message: "Email required" });
-    await usersCol().updateOne({ email: data.email }, { $set: { address: data } }, { upsert: true });
+    await usersCol().updateOne(
+      { email: data.email },
+      { $set: { address: data } },
+      { upsert: true }
+    );
     res.json({ message: "Address saved" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -183,12 +195,8 @@ app.post("/add-address", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 //  PRODUCTS
 // ═══════════════════════════════════════════════════════
-app.get("/api/products", async (req, res) => {
-  try {
-    res.json(await Product.find().sort({ createdAt: -1 }));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 
+// ✅ check-stock MUST be before /:id to avoid route conflict
 app.post("/api/products/check-stock", async (req, res) => {
   try {
     const { productId, color, quantity = 1 } = req.body;
@@ -196,10 +204,18 @@ app.post("/api/products/check-stock", async (req, res) => {
     if (!product) return res.status(404).json({ error: "Product not found" });
     let available = product.stock;
     if (product.colorVariants?.length > 0 && color) {
-      const v = product.colorVariants.find(v => v.name.toLowerCase() === color.toLowerCase());
+      const v = product.colorVariants.find(
+        v => v.name.toLowerCase() === color.toLowerCase()
+      );
       available = v?.stock || 0;
     }
     res.json({ available, soldOut: available === 0, canAdd: available >= quantity });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get("/api/products", async (req, res) => {
+  try {
+    res.json(await Product.find().sort({ createdAt: -1 }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -212,12 +228,14 @@ app.get("/api/products/:id", async (req, res) => {
 });
 
 app.post("/api/products", upload.fields([
-  { name:"images", maxCount:4 },
+  { name:"images",        maxCount:4  },
   { name:"variantImages", maxCount:20 },
 ]), async (req, res) => {
   try {
-    const { name, description, price, originalPrice,
-            sizes, fabric, color, stock, category, colorVariants } = req.body;
+    const {
+      name, description, price, originalPrice,
+      sizes, fabric, color, stock, category, colorVariants,
+    } = req.body;
 
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
     const images = (req.files["images"] || []).map(getUrl).filter(Boolean);
@@ -255,12 +273,17 @@ app.post("/api/products", upload.fields([
 
 app.put("/api/products/:id", async (req, res) => {
   try {
-    const { name, description, price, originalPrice,
-            sizes, fabric, color, stock, category, soldOut, colorVariants } = req.body;
+    const {
+      name, description, price, originalPrice,
+      sizes, fabric, color, stock, category, soldOut, colorVariants,
+    } = req.body;
     const updated = await Product.findByIdAndUpdate(req.params.id, {
       name, description,
-      price: Number(price), originalPrice: Number(originalPrice),
-      sizes: typeof sizes === "string" ? JSON.parse(sizes) : sizes,
+      price:         Number(price),
+      originalPrice: Number(originalPrice),
+      sizes: typeof sizes === "string"
+        ? sizes.split(",").map(s => s.trim()).filter(Boolean)
+        : (sizes || []),
       colorVariants: typeof colorVariants === "string"
         ? JSON.parse(colorVariants)
         : (colorVariants || []),
@@ -282,6 +305,71 @@ app.delete("/api/products/:id", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 //  ORDERS
 // ═══════════════════════════════════════════════════════
+app.post("/api/orders", async (req, res) => {
+  try {
+    const {
+      email, userName, items, totalAmount, address,
+      paymentMethod, paymentId, paymentStatus,
+    } = req.body;
+
+    if (!items || items.length === 0)
+      return res.status(400).json({ error: "No items in order" });
+
+    // Stock check
+    for (const item of items) {
+      const product = await Product.findById(item.productId).catch(() => null);
+      if (!product) continue;
+      if (product.stock < (item.quantity || 1))
+        return res.status(400).json({
+          error: `Only ${product.stock} left for ${item.name}`
+        });
+    }
+
+    const order = await Order.create({
+      email:         email || "guest@gmail.com",
+      userName:      userName || "",
+      items,
+      totalAmount:   Number(totalAmount || 0),
+      total_amount:  Number(totalAmount || 0),
+      address:       address || {},
+      paymentMethod: paymentMethod || "COD",
+      payment_method:paymentMethod || "COD",
+      paymentId:     paymentId || "",
+      paymentStatus: paymentStatus || "Pending",
+      status:        "Confirmed",
+    });
+
+    console.log("✅ Order saved:", order._id);
+
+    // Reduce stock
+    for (const item of items) {
+      if (!item.productId) continue;
+      const product = await Product.findById(item.productId).catch(() => null);
+      if (!product) continue;
+      const newStock = Math.max(0, product.stock - (item.quantity || 1));
+      await Product.findByIdAndUpdate(item.productId, {
+        stock: newStock, soldOut: newStock === 0,
+      });
+    }
+
+    // Send emails non-blocking
+    Promise.all([
+      sendCustomerEmail({ email, orderId: order._id, products: items,
+        totalAmount, address, paymentMethod })
+        .catch(e => console.error("Customer email:", e.message)),
+      sendAdminEmail({ email, orderId: order._id, products: items,
+        totalAmount, address, paymentMethod })
+        .catch(e => console.error("Admin email:", e.message)),
+    ]);
+
+    res.status(201).json({ success: true, order });
+  } catch (err) {
+    console.error("Order error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Legacy order route — redirect to new one
 app.post("/add-order", async (req, res) => {
   try {
     const {
@@ -293,33 +381,34 @@ app.post("/add-order", async (req, res) => {
     if (!items || items.length === 0)
       return res.status(400).json({ error: "No items in order" });
 
-    // Stock check
-    for (const item of items) {
-      const product = await Product.findById(item.productId).catch(() => null);
-      if (!product) continue;
-      if (product.stock < (item.quantity || 1))
-        return res.status(400).json({ error: `Only ${product.stock} left for ${item.name}` });
-    }
-
-    const normalizedProducts = items.map(item => ({
-      productId:    item.productId || item._id || "",
-      name:         item.name      || "",
-      price:        Number(item.price)    || 0,
-      quantity:     Number(item.quantity) || 1,
-      size:         item.selectedSize || item.size || "",
-      selectedSize: item.selectedSize || item.size || "",
-      color:        item.color  || "",
-      image:        item.image  || item.images?.[0] || "",
-      images:       item.images || [],
+    const normalizedItems = items.map(item => ({
+      productId:   item.productId || item._id || "",
+      name:        item.name      || "",
+      price:       Number(item.price) || 0,
+      quantity:    Number(item.quantity) || 1,
+      size:        item.selectedSize || item.size || "",
+      selectedSize:item.selectedSize || item.size || "",
+      color:       item.color || "",
+      image:       item.image || item.images?.[0] || "",
     }));
 
     const finalPayMethod = payment_method || paymentMethod || "COD";
     const finalTotal     = Number(total_amount || totalAmount || 0);
 
-    const order = new Order({
+    // Stock check
+    for (const item of normalizedItems) {
+      const product = await Product.findById(item.productId).catch(() => null);
+      if (!product) continue;
+      if (product.stock < item.quantity)
+        return res.status(400).json({
+          error: `Only ${product.stock} left for ${item.name}`
+        });
+    }
+
+    const order = await Order.create({
       user_id:        user_id || email,
       email:          email   || "guest@gmail.com",
-      phone:          phone   || address?.phone || "Not Provided",
+      phone:          phone   || address?.phone || "",
       address:        address || {},
       payment_method: finalPayMethod,
       paymentMethod:  finalPayMethod,
@@ -327,14 +416,15 @@ app.post("/add-order", async (req, res) => {
       paymentStatus:  paymentStatus || "Pending",
       total_amount:   finalTotal,
       totalAmount:    finalTotal,
-      products:       normalizedProducts,
+      items:          normalizedItems,
+      products:       normalizedItems,
       status:         "Confirmed",
     });
-    await order.save();
-    console.log("✅ Order saved:", order._id, "| items:", order.products.length);
+
+    console.log("✅ Order saved (legacy):", order._id);
 
     // Reduce stock
-    for (const item of normalizedProducts) {
+    for (const item of normalizedItems) {
       if (!item.productId) continue;
       const product = await Product.findById(item.productId).catch(() => null);
       if (!product) continue;
@@ -344,22 +434,15 @@ app.post("/add-order", async (req, res) => {
       });
     }
 
-    // Send emails (non-blocking)
     Promise.all([
-      sendCustomerEmail({
-        email, orderId: order._id,
-        products: normalizedProducts,
-        totalAmount: finalTotal,
-        address: address || {},
-        paymentMethod: finalPayMethod,
-      }).catch(e => console.error("Customer email:", e.message)),
-      sendAdminEmail({
-        email, orderId: order._id,
-        products: normalizedProducts,
-        totalAmount: finalTotal,
-        address: address || {},
-        paymentMethod: finalPayMethod,
-      }).catch(e => console.error("Admin email:", e.message)),
+      sendCustomerEmail({ email, orderId: order._id,
+        products: normalizedItems, totalAmount: finalTotal,
+        address, paymentMethod: finalPayMethod })
+        .catch(e => console.error("Customer email:", e.message)),
+      sendAdminEmail({ email, orderId: order._id,
+        products: normalizedItems, totalAmount: finalTotal,
+        address, paymentMethod: finalPayMethod })
+        .catch(e => console.error("Admin email:", e.message)),
     ]);
 
     res.status(201).json({ success: true, orderId: order._id });
@@ -371,7 +454,8 @@ app.post("/add-order", async (req, res) => {
 
 app.get("/my-orders/:email", async (req, res) => {
   try {
-    const list = await Order.find({ email: req.params.email }).sort({ createdAt: -1 });
+    const list = await Order.find({ email: req.params.email })
+      .sort({ createdAt: -1 });
     res.json(list);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -383,6 +467,13 @@ app.get("/api/admin/users", async (req, res) => {
   if (req.query.password !== ADMIN_PASS)
     return res.status(401).json({ error: "Unauthorized" });
   try { res.json(await User.find().sort({ lastLogin: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get("/api/admin/products", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
+  try { res.json(await Product.find().sort({ createdAt: -1 })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -406,11 +497,27 @@ app.put("/api/admin/orders/:id", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get("/api/admin/products", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS)
+app.put("/api/admin/orders/:id/tracking", async (req, res) => {
+  if (req.body.password !== ADMIN_PASS)
     return res.status(401).json({ error: "Unauthorized" });
-  try { res.json(await Product.find().sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const { courierName, trackingNumber, estimatedDelivery, status } = req.body;
+    const trackingUrl = courierName === "DTDC"
+      ? `https://www.dtdc.in/trace.asp?txtnbr=${trackingNumber}`
+      : `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
+
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      {
+        courierName, trackingNumber, trackingUrl,
+        estimatedDelivery,
+        status:    status || "Shipped",
+        shippedAt: new Date(),
+      },
+      { new: true }
+    );
+    res.json({ success: true, order: updated });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/stock-alerts", async (req, res) => {
@@ -422,44 +529,18 @@ app.get("/api/admin/stock-alerts", async (req, res) => {
         p.colorVariants.forEach(v => {
           if (v.stock <= 3)
             alerts.push({
-              productId:   p._id,
-              productName: p.name,
-              color:       v.name,
-              stock:       v.stock,
-              soldOut:     v.stock === 0,
+              productId: p._id, productName: p.name,
+              color: v.name, stock: v.stock, soldOut: v.stock === 0,
             });
         });
       } else if (p.stock <= 3) {
         alerts.push({
-          productId:   p._id,
-          productName: p.name,
-          color:       p.color || "—",
-          stock:       p.stock,
-          soldOut:     p.soldOut,
+          productId: p._id, productName: p.name,
+          color: p.color || "—", stock: p.stock, soldOut: p.soldOut,
         });
       }
     });
     res.json(alerts);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put("/api/admin/orders/:id/tracking", async (req, res) => {
-  if (req.body.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
-  try {
-    const { courierName, trackingNumber, estimatedDelivery, status } = req.body;
-    const trackingUrl = `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
-      {
-        courierName, trackingNumber, trackingUrl,
-        estimatedDelivery,
-        status:     status || "Shipped",
-        shippedAt:  new Date(),
-      },
-      { new: true }
-    );
-    res.json({ success: true, order: updated });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -496,9 +577,10 @@ app.post("/api/admin/request-otp", async (req, res) => {
       html: `
         <div style="background:#1a1008;padding:32px;font-family:Arial">
           <h2 style="color:#c8a04a">Admin Login OTP</h2>
-          <div style="font-size:40px;font-weight:700;color:#c8a04a;letter-spacing:10px;
-                      font-family:monospace;background:#0f0a04;padding:20px;
-                      text-align:center;border-radius:8px;border:2px solid #c8a04a">
+          <div style="font-size:40px;font-weight:700;color:#c8a04a;
+                      letter-spacing:10px;font-family:monospace;
+                      background:#0f0a04;padding:20px;text-align:center;
+                      border-radius:8px;border:2px solid #c8a04a">
             ${otp}
           </div>
           <p style="color:#7a5a30;margin-top:16px">
@@ -510,7 +592,10 @@ app.post("/api/admin/request-otp", async (req, res) => {
     res.json({ success: true, message: `OTP sent to ${adminEmail}` });
   } catch (err) {
     console.log(`🔐 DEV OTP (email failed): ${otp}`);
-    res.json({ success: true, message: "OTP sent (check server console if email fails)" });
+    res.json({
+      success: true,
+      message: "OTP sent (check server console if email fails)"
+    });
   }
 });
 
@@ -530,7 +615,9 @@ app.post("/api/admin/verify-otp", (req, res) => {
 
   delete otpStore[adminEmail];
   const sessionToken = crypto.randomBytes(32).toString("hex");
-  otpStore[`session_${sessionToken}`] = { expiresAt: Date.now() + 2 * 60 * 60 * 1000 };
+  otpStore[`session_${sessionToken}`] = {
+    expiresAt: Date.now() + 2 * 60 * 60 * 1000
+  };
   res.json({ success: true, sessionToken });
 });
 
@@ -538,20 +625,23 @@ app.post("/api/admin/verify-otp", (req, res) => {
 //  CHATBOT
 // ═══════════════════════════════════════════════════════
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
+
 app.post("/chat", async (req, res) => {
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a helpful assistant for an online saree shopping store." },
-        { role: "user",   content: req.body.message },
+        { role:"system", content:"You are a helpful assistant for an online saree shopping store." },
+        { role:"user",   content: req.body.message },
       ],
     });
     res.json({ reply: response.choices[0].message.content });
-  } catch { res.json({ reply: "Sorry, I couldn't answer right now." }); }
+  } catch {
+    res.json({ reply: "Sorry, I couldn't answer right now." });
+  }
 });
 
-// ── Handle unhandled rejections (prevent crashes) ─────
+// ── Prevent unhandled rejections from crashing server ─
 process.on("unhandledRejection", (reason) => {
   console.error("⚠️  Unhandled rejection:", reason?.message || reason);
 });
