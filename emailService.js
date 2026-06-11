@@ -32,7 +32,7 @@ const STORE_URL = process.env.STORE_URL || "http://localhost:3000";
 // ── Fetch image and convert to base64 (max 80KB to avoid Gmail clipping) ──
 const imageToBase64 = (url) => new Promise((resolve) => {
   if (!url) return resolve(null);
-  const fetchUrl = url.replace(/https?:\/\/[^\/]+/, "http://localhost:8000");
+  const fetchUrl = url.replace(/https?:\/\/[^\/]+/, "https://manavastralu-backend-production.up.railway.app");
   const protocol = fetchUrl.startsWith("https") ? https : http;
   try {
     protocol.get(fetchUrl, { timeout: 3000 }, (res) => {

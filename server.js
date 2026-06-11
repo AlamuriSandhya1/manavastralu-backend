@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 const express    = require("express");
 const cors       = require("cors");
@@ -8,7 +9,7 @@ const { MongoClient } = require("mongodb");
 const fs         = require("fs");
 const crypto     = require("crypto");
 const OpenAI     = require("openai");
-const cloudinary        = require("cloudinary").v2;
+const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
@@ -20,80 +21,77 @@ const UPLOAD_DIR = "uploads";
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 app.use("/uploads", express.static(UPLOAD_DIR));
 
-// ── Cloudinary config ─────────────────────────────────
+// ── Cloudinary ────────────────────────────────────────
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-
 const cloudStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder:          "mana-vastralu",
-    allowed_formats: ["jpg", "jpeg", "png", "webp"],
-    transformation:  [{ width: 800, height: 1000, crop: "limit", quality: "auto" }],
+    allowed_formats: ["jpg","jpeg","png","webp"],
+    transformation:  [{ width:800, height:1000, crop:"limit", quality:"auto" }],
   },
 });
 const upload = multer({ storage: cloudStorage });
 
-// ── MongoDB Native (users / addresses) ───────────────
-const mongoClient = new MongoClient(
-  process.env.MONGODB_URI || "mongodb://localhost:27017"
-);
+// ── MongoDB connection string ─────────────────────────
+// ✅ Use Atlas URI if set, otherwise local
+const MONGO_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db";
+
+// ── Mongoose (single connection, no duplicate) ────────
+mongoose.connect(MONGO_URI)
+  .then(() => console.log("✅ Mongoose connected"))
+  .catch(err => console.error("❌ Mongoose error:", err.message));
+
+// ── MongoDB Native client (single instance) ───────────
+const mongoClient = new MongoClient(MONGO_URI);
 let db;
+
 async function connectDB() {
-  await mongoClient.connect();
-  db = mongoClient.db("silks_db");
-  console.log("MongoDB connected");
+  try {
+    await mongoClient.connect();
+    db = mongoClient.db("silks_db");
+    console.log("✅ MongoDB native connected");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err.message);
+    console.log("   Retrying in 10 seconds...");
+    setTimeout(connectDB, 10000); // retry, don't crash
+  }
 }
 connectDB();
 
-const usersCol     = () => db.collection("users");
-const addressesCol = () => db.collection("addresses");
+const usersCol     = () => db?.collection("users");
+const addressesCol = () => db?.collection("addresses");
 
-// ── Mongoose ──────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db")
-  .then(() => console.log("Mongoose connected"))
-  .catch(err => console.log("Mongoose error:", err));
-
+// ── Models ────────────────────────────────────────────
 const Product = require("./models/Product");
 const Order   = require("./models/Order");
 const User    = require("./models/User");
 
-// ── Email service ─────────────────────────────────────
+// ── Email service (optional) ──────────────────────────
 let sendCustomerEmail = async () => {};
 let sendAdminEmail    = async () => {};
 try {
-  const emailService = require("./emailService");
-  sendCustomerEmail  = emailService.sendCustomerEmail || sendCustomerEmail;
-  sendAdminEmail     = emailService.sendAdminEmail    || sendAdminEmail;
-} catch (e) {
-  console.log("⚠️  emailService not found — emails disabled");
-}
+  const svc = require("./emailService");
+  sendCustomerEmail = svc.sendCustomerEmail || sendCustomerEmail;
+  sendAdminEmail    = svc.sendAdminEmail    || sendAdminEmail;
+} catch { console.log("⚠️  emailService not found — emails disabled"); }
 
-// ── Razorpay routes ───────────────────────────────────
+// ── Razorpay ──────────────────────────────────────────
 const razorpayRoutes = require("./routes/razorpay");
 app.use("/api/payment", razorpayRoutes);
 
-// ── OTP store (in-memory) ─────────────────────────────
-const otpStore = {};
+// ── OTP store ─────────────────────────────────────────
+const otpStore   = {};
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin123";
 
 // ═══════════════════════════════════════════════════════
 //  HOME
 // ═══════════════════════════════════════════════════════
-app.get("/", (req, res) => {
-  res.json({ message: "Backend running successfully" });
-});
-
-// ── Cleanup empty orders ──────────────────────────────
-app.get("/cleanup-orders", async (req, res) => {
-  try {
-    const r = await Order.deleteMany({ products: { $size: 0 } });
-    res.json({ deleted: r.deletedCount, message: "Done" });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get("/", (req, res) => res.json({ message: "Backend running" }));
 
 // ═══════════════════════════════════════════════════════
 //  AUTH
@@ -104,8 +102,7 @@ app.post("/api/auth/login", async (req, res) => {
     const user = await User.findOneAndUpdate(
       { email },
       { name, photo, lastLogin: new Date(),
-        $inc: { loginCount: 1 },
-        $setOnInsert: { createdAt: new Date() } },
+        $inc: { loginCount: 1 }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true, new: true }
     );
     res.json({ success: true, user });
@@ -113,50 +110,52 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/register", async (req, res) => {
-  const { name, email, password } = req.body;
-  const existing = await usersCol().findOne({ email });
-  if (existing) return res.status(400).json({ message: "User already exists" });
-  const hashed = await bcrypt.hash(password, 10);
-  await usersCol().insertOne({ name, email, password: hashed });
-  res.json({ message: "User registered successfully" });
+  try {
+    const { name, email, password } = req.body;
+    const existing = await usersCol().findOne({ email });
+    if (existing) return res.status(400).json({ message: "User already exists" });
+    const hashed = await bcrypt.hash(password, 10);
+    await usersCol().insertOne({ name, email, password: hashed });
+    res.json({ message: "User registered successfully" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  const user = await usersCol().findOne({ email });
-  if (!user) return res.status(400).json({ message: "User not found" });
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(400).json({ message: "Incorrect password" });
-  await usersCol().updateOne({ email }, { $set: { last_login: new Date() } });
-  res.json({ message: "Login successful", user: email });
+  try {
+    const { email, password } = req.body;
+    const user = await usersCol().findOne({ email });
+    if (!user) return res.status(400).json({ message: "User not found" });
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(400).json({ message: "Incorrect password" });
+    await usersCol().updateOne({ email }, { $set: { last_login: new Date() } });
+    res.json({ message: "Login successful", user: email });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ═══════════════════════════════════════════════════════
-//  USERS
+//  USERS / ADDRESS
 // ═══════════════════════════════════════════════════════
 app.get("/users", async (req, res) => {
-  const list = await usersCol()
-    .find({}, { projection: { password: 0 } }).toArray();
-  res.json(list);
+  try {
+    const list = await usersCol().find({}, { projection: { password: 0 } }).toArray();
+    res.json(list);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ═══════════════════════════════════════════════════════
-//  ADDRESS
-// ═══════════════════════════════════════════════════════
 app.post("/save-address", async (req, res) => {
-  const data = req.body;
-  if (!data.email) return res.status(400).json({ message: "Email required" });
-  await usersCol().updateOne(
-    { email: data.email },
-    { $set: { address: data } },
-    { upsert: true }
-  );
-  res.json({ message: "Address saved successfully" });
+  try {
+    const data = req.body;
+    if (!data.email) return res.status(400).json({ message: "Email required" });
+    await usersCol().updateOne({ email: data.email }, { $set: { address: data } }, { upsert: true });
+    res.json({ message: "Address saved" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/add-address", async (req, res) => {
-  await addressesCol().insertOne(req.body);
-  res.json({ message: "Address saved successfully" });
+  try {
+    await addressesCol().insertOne(req.body);
+    res.json({ message: "Address saved" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ═══════════════════════════════════════════════════════
@@ -164,8 +163,7 @@ app.post("/add-address", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 app.get("/api/products", async (req, res) => {
   try {
-    const list = await Product.find().sort({ createdAt: -1 });
-    res.json(list);
+    res.json(await Product.find().sort({ createdAt: -1 }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -174,14 +172,10 @@ app.post("/api/products/check-stock", async (req, res) => {
     const { productId, color, quantity = 1 } = req.body;
     const product = await Product.findById(productId);
     if (!product) return res.status(404).json({ error: "Product not found" });
-    let available = 0;
+    let available = product.stock;
     if (product.colorVariants?.length > 0 && color) {
-      const variant = product.colorVariants.find(
-        v => v.name.toLowerCase() === color.toLowerCase()
-      );
-      available = variant?.stock || 0;
-    } else {
-      available = product.stock;
+      const v = product.colorVariants.find(v => v.name.toLowerCase() === color.toLowerCase());
+      available = v?.stock || 0;
     }
     res.json({ available, soldOut: available === 0, canAdd: available >= quantity });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -189,37 +183,32 @@ app.post("/api/products/check-stock", async (req, res) => {
 
 app.get("/api/products/:id", async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ error: "Product not found" });
-    res.json(product);
+    const p = await Product.findById(req.params.id);
+    if (!p) return res.status(404).json({ error: "Product not found" });
+    res.json(p);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/api/products", upload.fields([
-  { name: "images",        maxCount: 4  },
-  { name: "variantImages", maxCount: 20 },
+  { name:"images", maxCount:4 },
+  { name:"variantImages", maxCount:20 },
 ]), async (req, res) => {
   try {
-    const {
-      name, description, price, originalPrice,
-      sizes, fabric, color, stock, category, colorVariants,
-    } = req.body;
+    const { name, description, price, originalPrice,
+            sizes, fabric, color, stock, category, colorVariants } = req.body;
 
-    // ✅ Cloudinary returns secure_url directly
-    const images = (req.files["images"] || [])
-      .map(f => f.path || f.secure_url || ("uploads/" + f.filename));
+    // ✅ Cloudinary: use f.path (secure_url). Local: use uploads/ + filename
+    const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
+    const images = (req.files["images"] || []).map(getUrl).filter(Boolean);
 
     let parsedVariants = [];
     if (colorVariants) {
-      parsedVariants = JSON.parse(colorVariants);
       const variantFiles = req.files["variantImages"] || [];
-      parsedVariants = parsedVariants
+      parsedVariants = JSON.parse(colorVariants)
         .map((v, i) => ({
           name:  v.name,
           stock: Number(v.stock) || 10,
-          image: variantFiles[i]
-            ? (variantFiles[i].path || variantFiles[i].secure_url || "")
-            : (images[0] || ""),
+          image: variantFiles[i] ? getUrl(variantFiles[i]) : (images[0] || ""),
         }))
         .filter(v => v.name.trim() !== "");
     }
@@ -246,23 +235,16 @@ app.post("/api/products", upload.fields([
 app.put("/api/products/:id", async (req, res) => {
   try {
     const { name, description, price, originalPrice,
-            sizes, fabric, color, stock, category,
-            soldOut, colorVariants } = req.body;
-    const updated = await Product.findByIdAndUpdate(
-      req.params.id,
-      {
-        name, description,
-        price:         Number(price),
-        originalPrice: Number(originalPrice),
-        sizes:         typeof sizes === "string" ? JSON.parse(sizes) : sizes,
-        colorVariants: typeof colorVariants === "string"
-                         ? JSON.parse(colorVariants) : (colorVariants || []),
-        fabric, color, category,
-        stock:   Number(stock),
-        soldOut: Number(stock) === 0 ? true : Boolean(soldOut),
-      },
-      { new: true }
-    );
+            sizes, fabric, color, stock, category, soldOut, colorVariants } = req.body;
+    const updated = await Product.findByIdAndUpdate(req.params.id, {
+      name, description,
+      price: Number(price), originalPrice: Number(originalPrice),
+      sizes: typeof sizes === "string" ? JSON.parse(sizes) : sizes,
+      colorVariants: typeof colorVariants === "string" ? JSON.parse(colorVariants) : (colorVariants || []),
+      fabric, color, category,
+      stock:   Number(stock),
+      soldOut: Number(stock) === 0 ? true : Boolean(soldOut),
+    }, { new: true });
     res.json(updated);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -275,16 +257,14 @@ app.delete("/api/products/:id", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-//  ORDERS  — single /add-order route
+//  ORDERS
 // ═══════════════════════════════════════════════════════
 app.post("/add-order", async (req, res) => {
   try {
     const {
       user_id, email, phone, address,
-      payment_method, paymentMethod,
-      paymentId, paymentStatus,
-      total_amount, totalAmount,
-      products: items,
+      payment_method, paymentMethod, paymentId, paymentStatus,
+      total_amount, totalAmount, products: items,
     } = req.body;
 
     if (!items || items.length === 0)
@@ -299,13 +279,15 @@ app.post("/add-order", async (req, res) => {
     }
 
     const normalizedProducts = items.map(item => ({
-      productId: item.productId || item._id || "",
-      name:      item.name      || "",
-      price:     Number(item.price)    || 0,
-      quantity:  Number(item.quantity) || 1,
-      size:      item.selectedSize || item.size || "",
-      color:     item.color  || "",
-      image:     item.image  || item.images?.[0] || "",
+      productId:    item.productId || item._id || "",
+      name:         item.name      || "",
+      price:        Number(item.price)    || 0,
+      quantity:     Number(item.quantity) || 1,
+      size:         item.selectedSize || item.size || "",
+      selectedSize: item.selectedSize || item.size || "",
+      color:        item.color  || "",
+      image:        item.image  || item.images?.[0] || "",
+      images:       item.images || [],
     }));
 
     const finalPayMethod = payment_method || paymentMethod || "COD";
@@ -317,13 +299,16 @@ app.post("/add-order", async (req, res) => {
       phone:          phone   || address?.phone || "Not Provided",
       address:        address || {},
       payment_method: finalPayMethod,
-      razorpay_id:    paymentId || null,
+      paymentMethod:  finalPayMethod,
+      paymentId:      paymentId || "",
+      paymentStatus:  paymentStatus || "Pending",
       total_amount:   finalTotal,
+      totalAmount:    finalTotal,
       products:       normalizedProducts,
-      status:         "Pending",
+      status:         "Confirmed",
     });
     await order.save();
-    console.log("✅ Order saved:", order._id, "| products:", order.products.length);
+    console.log("✅ Order saved:", order._id, "| items:", order.products.length);
 
     // Reduce stock
     for (const item of normalizedProducts) {
@@ -331,26 +316,20 @@ app.post("/add-order", async (req, res) => {
       const product = await Product.findById(item.productId).catch(() => null);
       if (!product) continue;
       const newStock = Math.max(0, product.stock - item.quantity);
-      await Product.findByIdAndUpdate(item.productId, {
-        stock: newStock, soldOut: newStock === 0,
-      });
+      await Product.findByIdAndUpdate(item.productId, { stock: newStock, soldOut: newStock === 0 });
     }
 
     // Send emails (non-blocking)
-    const emailData = {
-      email, orderId: order._id,
-      products: normalizedProducts,
-      totalAmount: finalTotal,
-      address: address || {},
-      paymentMethod: finalPayMethod,
-    };
     Promise.all([
-      sendCustomerEmail(emailData).catch(e => console.error("Customer email:", e.message)),
-      sendAdminEmail(emailData).catch(e =>    console.error("Admin email:",    e.message)),
+      sendCustomerEmail({ email, orderId: order._id, products: normalizedProducts,
+        totalAmount: finalTotal, address: address || {}, paymentMethod: finalPayMethod })
+        .catch(e => console.error("Customer email:", e.message)),
+      sendAdminEmail({ email, orderId: order._id, products: normalizedProducts,
+        totalAmount: finalTotal, address: address || {}, paymentMethod: finalPayMethod })
+        .catch(e => console.error("Admin email:", e.message)),
     ]);
 
     res.status(201).json({ success: true, orderId: order._id });
-
   } catch (err) {
     console.error("Order error:", err);
     res.status(500).json({ error: err.message });
@@ -364,52 +343,33 @@ app.get("/my-orders/:email", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get("/api/orders/:email", async (req, res) => {
-  try {
-    const list = await Order.find({ email: req.params.email }).sort({ createdAt: -1 });
-    res.json(list);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
 // ═══════════════════════════════════════════════════════
 //  ADMIN
 // ═══════════════════════════════════════════════════════
 app.get("/api/admin/users", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
-  try {
-    const list = await User.find().sort({ lastLogin: -1 });
-    res.json(list);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  try { res.json(await User.find().sort({ lastLogin: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/orders", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
-  try {
-    const list = await Order.find().sort({ createdAt: -1 });
-    res.json(list);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  try { res.json(await Order.find().sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put("/api/admin/orders/:id", async (req, res) => {
-  if (req.body.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
+  if (req.body.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
   try {
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id, { status: req.body.status }, { new: true }
-    );
+    const updated = await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
     res.json(updated);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/products", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
-  try {
-    const list = await Product.find().sort({ createdAt: -1 });
-    res.json(list);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  try { res.json(await Product.find().sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/stock-alerts", async (req, res) => {
@@ -419,16 +379,10 @@ app.get("/api/admin/stock-alerts", async (req, res) => {
     list.forEach(p => {
       if (p.colorVariants?.length > 0) {
         p.colorVariants.forEach(v => {
-          if (v.stock <= 3) alerts.push({
-            productId: p._id, productName: p.name,
-            color: v.name, stock: v.stock, soldOut: v.stock === 0,
-          });
+          if (v.stock <= 3) alerts.push({ productId:p._id, productName:p.name, color:v.name, stock:v.stock, soldOut:v.stock===0 });
         });
       } else if (p.stock <= 3) {
-        alerts.push({
-          productId: p._id, productName: p.name,
-          color: p.color || "—", stock: p.stock, soldOut: p.soldOut,
-        });
+        alerts.push({ productId:p._id, productName:p.name, color:p.color||"—", stock:p.stock, soldOut:p.soldOut });
       }
     });
     res.json(alerts);
@@ -436,17 +390,12 @@ app.get("/api/admin/stock-alerts", async (req, res) => {
 });
 
 app.put("/api/admin/orders/:id/tracking", async (req, res) => {
-  if (req.body.password !== ADMIN_PASS)
-    return res.status(401).json({ error: "Unauthorized" });
+  if (req.body.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
   try {
     const { courierName, trackingNumber, estimatedDelivery, status } = req.body;
-    const trackingUrl = courierName === "DTDC"
-      ? `https://www.dtdc.in/trace.asp?txndetails=${trackingNumber}`
-      : `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
-      { courierName, trackingNumber, trackingUrl, estimatedDelivery,
-        status: status || "Shipped", shippedAt: new Date() },
+    const trackingUrl = `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
+    const updated = await Order.findByIdAndUpdate(req.params.id,
+      { courierName, trackingNumber, trackingUrl, estimatedDelivery, status: status||"Shipped", shippedAt: new Date() },
       { new: true }
     );
     res.json({ success: true, order: updated });
@@ -454,7 +403,7 @@ app.put("/api/admin/orders/:id/tracking", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-//  ADMIN OTP LOGIN
+//  ADMIN 2FA OTP
 // ═══════════════════════════════════════════════════════
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -472,22 +421,24 @@ app.post("/api/admin/request-otp", async (req, res) => {
     const nodemailer  = require("nodemailer");
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com", port: 465, secure: true,
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: (process.env.GMAIL_PASS || "").replace(/\s/g, ""),
-      },
+      auth: { user: process.env.GMAIL_USER, pass: (process.env.GMAIL_PASS||"").replace(/\s/g,"") },
+      tls: { rejectUnauthorized: false },
     });
     await transporter.sendMail({
       from:    `"Mana Vastralu Security" <${process.env.GMAIL_USER}>`,
       to:      adminEmail,
-      subject: `🔐 Admin OTP: ${otp}`,
-      html:    `<h2 style="color:#c8a04a">Your OTP: <span style="font-size:32px;letter-spacing:8px">${otp}</span></h2><p>Valid for 5 minutes.</p>`,
+      subject: `🔐 Admin OTP: ${otp} — Mana Vastralu`,
+      html:    `<div style="background:#1a1008;padding:32px;font-family:Arial">
+        <h2 style="color:#c8a04a">Admin Login OTP</h2>
+        <div style="font-size:40px;font-weight:700;color:#c8a04a;letter-spacing:10px;font-family:monospace;background:#0f0a04;padding:20px;text-align:center;border-radius:8px;border:2px solid #c8a04a">${otp}</div>
+        <p style="color:#7a5a30;margin-top:16px">Valid for 5 minutes. Do not share this OTP.</p>
+      </div>`,
     });
     console.log(`✅ OTP sent to ${adminEmail}`);
     res.json({ success: true, message: `OTP sent to ${adminEmail}` });
   } catch (err) {
-    console.log(`🔐 DEV OTP: ${otp}`);
-    res.json({ success: true, message: "OTP sent (check server console)" });
+    console.log(`🔐 DEV OTP (email failed): ${otp}`);
+    res.json({ success: true, message: "OTP sent (check server console if email fails)" });
   }
 });
 
@@ -495,16 +446,12 @@ app.post("/api/admin/verify-otp", (req, res) => {
   const { otp } = req.body;
   const adminEmail = process.env.ADMIN_EMAIL || process.env.GMAIL_USER;
   const stored     = otpStore[adminEmail];
-
-  if (!stored)
-    return res.status(400).json({ success: false, message: "No OTP requested." });
+  if (!stored)              return res.status(400).json({ success:false, message:"No OTP requested." });
   if (Date.now() > stored.expiresAt) {
     delete otpStore[adminEmail];
-    return res.status(400).json({ success: false, message: "OTP expired." });
+    return res.status(400).json({ success:false, message:"OTP expired." });
   }
-  if (stored.otp !== otp.trim())
-    return res.status(400).json({ success: false, message: "Incorrect OTP." });
-
+  if (stored.otp !== otp.trim()) return res.status(400).json({ success:false, message:"Incorrect OTP." });
   delete otpStore[adminEmail];
   const sessionToken = crypto.randomBytes(32).toString("hex");
   otpStore[`session_${sessionToken}`] = { expiresAt: Date.now() + 2 * 60 * 60 * 1000 };
@@ -520,19 +467,22 @@ app.post("/chat", async (req, res) => {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a helpful assistant for an online saree shopping store." },
-        { role: "user",   content: req.body.message },
+        { role:"system", content:"You are a helpful assistant for an online saree shopping store." },
+        { role:"user",   content:req.body.message },
       ],
     });
     res.json({ reply: response.choices[0].message.content });
-  } catch (err) {
-    res.json({ reply: "Sorry, I couldn't answer right now." });
-  }
+  } catch { res.json({ reply: "Sorry, I couldn't answer right now." }); }
+});
+
+// ── Handle unhandled rejections (prevent crashes) ─────
+process.on("unhandledRejection", (reason) => {
+  console.error("⚠️  Unhandled rejection:", reason?.message || reason);
+  // Don't crash — just log
 });
 
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
-app.listen(8000, () => {
-  console.log("Server running on http://localhost:8000");
-});
+app.listen(8000, () => console.log("🚀 Server running on http://localhost:8000"));
+
