@@ -16,16 +16,20 @@ const createTransporter = () => {
 };
 
 const verifyEmail = async () => {
-  const t = createTransporter();
-  if (!t) return;
+  const transporter = createTransporter();
+
+  if (!transporter) {
+    console.log("❌ Gmail credentials missing");
+    return;
+  }
+
   try {
-    await t.verify();
-    console.log("✅ Email service ready —", process.env.GMAIL_USER);
+    await transporter.verify();
+    console.log("✅ Email service ready");
   } catch (err) {
-    console.error("❌ Email verify failed:", err.message);
+    console.error("❌ Email verify failed:", err);
   }
 };
-verifyEmail();
 
 const STORE_URL = process.env.STORE_URL || "http://localhost:3000";
 
