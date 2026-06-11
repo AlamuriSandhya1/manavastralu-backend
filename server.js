@@ -10,7 +10,9 @@ const crypto     = require("crypto");
 const OpenAI     = require("openai");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
-
+const Product = require("./models/Product");
+const Order   = require("./models/Order");
+const User    = require("./models/User");
 const app = express();
 
 // ── CORS — MUST be first ──────────────────────────────
