@@ -10,12 +10,16 @@ const crypto     = require("crypto");
 const OpenAI     = require("openai");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
-const Product = require("./models/Product");
-const Order   = require("./models/Order");
-const User    = require("./models/User");
-const app = express();
 
-// ── CORS — MUST be first ──────────────────────────────
+const app = express();
+app.get("/", (req, res) => {
+  res.send("Backend Running");
+});
+
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+// ── CORS ──────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   "https://manavastralu.com",
   "https://www.manavastralu.com",
@@ -27,19 +31,20 @@ app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    callback(null, true); // allow all for now during debugging
+    console.warn("⚠️  CORS blocked:", origin);
+    callback(new Error("Not allowed by CORS"));
   },
   credentials:    true,
   methods:        ["GET","POST","PUT","DELETE","OPTIONS"],
   allowedHeaders: ["Content-Type","Authorization"],
 }));
 
-// ✅ Preflight — no app.options("*") 
+// ✅ FIX — replaces app.options("*", cors()) which crashes newer Express
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
-    res.header("Access-Control-Allow-Origin",      req.headers.origin || "*");
-    res.header("Access-Control-Allow-Methods",     "GET,POST,PUT,DELETE,OPTIONS");
-    res.header("Access-Control-Allow-Headers",     "Content-Type,Authorization");
+    res.header("Access-Control-Allow-Origin",  req.headers.origin || "*");
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
     res.header("Access-Control-Allow-Credentials", "true");
     return res.sendStatus(200);
   }
@@ -48,7 +53,7 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// ── Upload folder ─────────────────────────────────────
+// ── Upload folder (local fallback) ────────────────────
 const UPLOAD_DIR = "uploads";
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 app.use("/uploads", express.static(UPLOAD_DIR));
@@ -70,38 +75,23 @@ const cloudStorage = new CloudinaryStorage({
 const upload = multer({ storage: cloudStorage });
 
 // ── MongoDB ───────────────────────────────────────────
-const MONGO_URI = process.env.MONGODB_URI;
-if (!MONGO_URI) {
-  console.error("❌ MONGODB_URI not set in environment variables!");
-}
-
-mongoose.connect(MONGO_URI, {
+mongoose.connect(process.env.MONGODB_URI, {
+  tls: true,
+  tlsInsecure: true,           // ← add this
   serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS:          45000,
-  family: 4,
+  socketTimeoutMS: 45000,
+  family: 4,                   // ← force IPv4, fixes Railway SSL issues
 })
   .then(() => console.log("✅ Mongoose connected"))
-  .catch(err => console.error("❌ Mongoose error:", err.message));
+  .catch(err => console.error("Mongoose error:", err.message));
 
-const mongoClient = new MongoClient(MONGO_URI, {
+const mongoClient = new MongoClient(process.env.MONGODB_URI, {
+  tls: true,
+  tlsInsecure: true,           // ← add this
   serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS:          45000,
-  family: 4,
+  socketTimeoutMS: 45000,
+  family: 4,                   // ← force IPv4
 });
-
-let db;
-async function connectDB() {
-  try {
-    await mongoClient.connect();
-    db = mongoClient.db("silks_db");
-    console.log("✅ MongoDB native connected");
-  } catch (err) {
-    console.error("❌ MongoDB connection failed:", err.message);
-    setTimeout(connectDB, 10000);
-  }
-}
-connectDB();
-
 const usersCol     = () => db?.collection("users");
 const addressesCol = () => db?.collection("addresses");
 
@@ -128,22 +118,9 @@ const otpStore   = {};
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin123";
 
 // ═══════════════════════════════════════════════════════
-//  HOME — single route only
+//  HOME
 // ═══════════════════════════════════════════════════════
-app.get("/", (req, res) => {
-  res.json({
-    message: "✅ Mana Vastralu Backend Running",
-    mongo:   mongoose.connection.readyState === 1 ? "connected" : "connecting",
-  });
-});
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    status:    "ok",
-    mongo:     mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.get("/", (req, res) => res.json({ message: "Backend running ✅" }));
 
 // ═══════════════════════════════════════════════════════
 //  AUTH
@@ -165,10 +142,10 @@ app.post("/api/auth/login", async (req, res) => {
 app.post("/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
-    const existing = await usersCol()?.findOne({ email });
+    const existing = await usersCol().findOne({ email });
     if (existing) return res.status(400).json({ message: "User already exists" });
     const hashed = await bcrypt.hash(password, 10);
-    await usersCol()?.insertOne({ name, email, password: hashed });
+    await usersCol().insertOne({ name, email, password: hashed });
     res.json({ message: "User registered successfully" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -176,11 +153,11 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await usersCol()?.findOne({ email });
+    const user = await usersCol().findOne({ email });
     if (!user) return res.status(400).json({ message: "User not found" });
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ message: "Incorrect password" });
-    await usersCol()?.updateOne({ email }, { $set: { last_login: new Date() } });
+    await usersCol().updateOne({ email }, { $set: { last_login: new Date() } });
     res.json({ message: "Login successful", user: email });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -191,8 +168,8 @@ app.post("/login", async (req, res) => {
 app.get("/users", async (req, res) => {
   try {
     const list = await usersCol()
-      ?.find({}, { projection: { password: 0 } }).toArray();
-    res.json(list || []);
+      .find({}, { projection: { password: 0 } }).toArray();
+    res.json(list);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -200,7 +177,7 @@ app.post("/save-address", async (req, res) => {
   try {
     const data = req.body;
     if (!data.email) return res.status(400).json({ message: "Email required" });
-    await usersCol()?.updateOne(
+    await usersCol().updateOne(
       { email: data.email },
       { $set: { address: data } },
       { upsert: true }
@@ -211,7 +188,7 @@ app.post("/save-address", async (req, res) => {
 
 app.post("/add-address", async (req, res) => {
   try {
-    await addressesCol()?.insertOne(req.body);
+    await addressesCol().insertOne(req.body);
     res.json({ message: "Address saved" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -219,6 +196,8 @@ app.post("/add-address", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 //  PRODUCTS
 // ═══════════════════════════════════════════════════════
+
+// ✅ check-stock MUST be before /:id to avoid route conflict
 app.post("/api/products/check-stock", async (req, res) => {
   try {
     const { productId, color, quantity = 1 } = req.body;
@@ -260,11 +239,11 @@ app.post("/api/products", upload.fields([
     } = req.body;
 
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
-    const images = (req.files?.["images"] || []).map(getUrl).filter(Boolean);
+    const images = (req.files["images"] || []).map(getUrl).filter(Boolean);
 
     let parsedVariants = [];
     if (colorVariants) {
-      const variantFiles = req.files?.["variantImages"] || [];
+      const variantFiles = req.files["variantImages"] || [];
       parsedVariants = JSON.parse(colorVariants)
         .map((v, i) => ({
           name:  v.name,
@@ -337,6 +316,7 @@ app.post("/api/orders", async (req, res) => {
     if (!items || items.length === 0)
       return res.status(400).json({ error: "No items in order" });
 
+    // Stock check
     for (const item of items) {
       const product = await Product.findById(item.productId).catch(() => null);
       if (!product) continue;
@@ -347,21 +327,22 @@ app.post("/api/orders", async (req, res) => {
     }
 
     const order = await Order.create({
-      email:          email || "guest@gmail.com",
-      userName:       userName || "",
+      email:         email || "guest@gmail.com",
+      userName:      userName || "",
       items,
-      totalAmount:    Number(totalAmount || 0),
-      total_amount:   Number(totalAmount || 0),
-      address:        address || {},
-      paymentMethod:  paymentMethod || "COD",
-      payment_method: paymentMethod || "COD",
-      paymentId:      paymentId || "",
-      paymentStatus:  paymentStatus || "Pending",
-      status:         "Confirmed",
+      totalAmount:   Number(totalAmount || 0),
+      total_amount:  Number(totalAmount || 0),
+      address:       address || {},
+      paymentMethod: paymentMethod || "COD",
+      payment_method:paymentMethod || "COD",
+      paymentId:     paymentId || "",
+      paymentStatus: paymentStatus || "Pending",
+      status:        "Confirmed",
     });
 
     console.log("✅ Order saved:", order._id);
 
+    // Reduce stock
     for (const item of items) {
       if (!item.productId) continue;
       const product = await Product.findById(item.productId).catch(() => null);
@@ -372,6 +353,7 @@ app.post("/api/orders", async (req, res) => {
       });
     }
 
+    // Send emails non-blocking
     Promise.all([
       sendCustomerEmail({ email, orderId: order._id, products: items,
         totalAmount, address, paymentMethod })
@@ -388,6 +370,7 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
+// Legacy order route — redirect to new one
 app.post("/add-order", async (req, res) => {
   try {
     const {
@@ -400,19 +383,20 @@ app.post("/add-order", async (req, res) => {
       return res.status(400).json({ error: "No items in order" });
 
     const normalizedItems = items.map(item => ({
-      productId:    item.productId || item._id || "",
-      name:         item.name      || "",
-      price:        Number(item.price)    || 0,
-      quantity:     Number(item.quantity) || 1,
-      size:         item.selectedSize || item.size || "",
-      selectedSize: item.selectedSize || item.size || "",
-      color:        item.color  || "",
-      image:        item.image  || item.images?.[0] || "",
+      productId:   item.productId || item._id || "",
+      name:        item.name      || "",
+      price:       Number(item.price) || 0,
+      quantity:    Number(item.quantity) || 1,
+      size:        item.selectedSize || item.size || "",
+      selectedSize:item.selectedSize || item.size || "",
+      color:       item.color || "",
+      image:       item.image || item.images?.[0] || "",
     }));
 
     const finalPayMethod = payment_method || paymentMethod || "COD";
     const finalTotal     = Number(total_amount || totalAmount || 0);
 
+    // Stock check
     for (const item of normalizedItems) {
       const product = await Product.findById(item.productId).catch(() => null);
       if (!product) continue;
@@ -440,6 +424,7 @@ app.post("/add-order", async (req, res) => {
 
     console.log("✅ Order saved (legacy):", order._id);
 
+    // Reduce stock
     for (const item of normalizedItems) {
       if (!item.productId) continue;
       const product = await Product.findById(item.productId).catch(() => null);
@@ -505,7 +490,9 @@ app.put("/api/admin/orders/:id", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   try {
     const updated = await Order.findByIdAndUpdate(
-      req.params.id, { status: req.body.status }, { new: true }
+      req.params.id,
+      { status: req.body.status },
+      { new: true }
     );
     res.json(updated);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -519,25 +506,33 @@ app.put("/api/admin/orders/:id/tracking", async (req, res) => {
     const trackingUrl = courierName === "DTDC"
       ? `https://www.dtdc.in/trace.asp?txtnbr=${trackingNumber}`
       : `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
-    const updated = await Order.findByIdAndUpdate(req.params.id, {
-      courierName, trackingNumber, trackingUrl,
-      estimatedDelivery, status: status || "Shipped", shippedAt: new Date(),
-    }, { new: true });
+
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      {
+        courierName, trackingNumber, trackingUrl,
+        estimatedDelivery,
+        status:    status || "Shipped",
+        shippedAt: new Date(),
+      },
+      { new: true }
+    );
     res.json({ success: true, order: updated });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/stock-alerts", async (req, res) => {
   try {
-    const list = await Product.find();
+    const list   = await Product.find();
     const alerts = [];
     list.forEach(p => {
       if (p.colorVariants?.length > 0) {
         p.colorVariants.forEach(v => {
-          if (v.stock <= 3) alerts.push({
-            productId: p._id, productName: p.name,
-            color: v.name, stock: v.stock, soldOut: v.stock === 0,
-          });
+          if (v.stock <= 3)
+            alerts.push({
+              productId: p._id, productName: p.name,
+              color: v.name, stock: v.stock, soldOut: v.stock === 0,
+            });
         });
       } else if (p.stock <= 3) {
         alerts.push({
@@ -598,7 +593,10 @@ app.post("/api/admin/request-otp", async (req, res) => {
     res.json({ success: true, message: `OTP sent to ${adminEmail}` });
   } catch (err) {
     console.log(`🔐 DEV OTP (email failed): ${otp}`);
-    res.json({ success: true, message: "OTP sent (check server console)" });
+    res.json({
+      success: true,
+      message: "OTP sent (check server console if email fails)"
+    });
   }
 });
 
@@ -619,7 +617,7 @@ app.post("/api/admin/verify-otp", (req, res) => {
   delete otpStore[adminEmail];
   const sessionToken = crypto.randomBytes(32).toString("hex");
   otpStore[`session_${sessionToken}`] = {
-    expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+    expiresAt: Date.now() + 2 * 60 * 60 * 1000
   };
   res.json({ success: true, sessionToken });
 });
@@ -634,7 +632,7 @@ app.post("/chat", async (req, res) => {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role:"system", content:"You are a helpful assistant for an online saree shopping store called Mana Vastralu." },
+        { role:"system", content:"You are a helpful assistant for an online saree shopping store." },
         { role:"user",   content: req.body.message },
       ],
     });
@@ -644,31 +642,13 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ── Global error handler ──────────────────────────────
+// ── Prevent unhandled rejections from crashing server ─
 process.on("unhandledRejection", (reason) => {
   console.error("⚠️  Unhandled rejection:", reason?.message || reason);
 });
 
-process.on("uncaughtException", (err) => {
-  console.error("⚠️  Uncaught exception:", err.message);
-});
-app.use((err, req, res, next) => {
-  console.error("GLOBAL ERROR:", err);
-  res.status(500).json({
-    success: false,
-    error: err.message
-  });
-});
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
-console.log("========== SERVER START ==========");
-console.log("PORT =", process.env.PORT);
-console.log("NODE_ENV =", process.env.NODE_ENV);
-console.log("MONGODB_URI =", process.env.MONGODB_URI ? "FOUND" : "MISSING");
-
 const PORT = process.env.PORT || 8000;
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
