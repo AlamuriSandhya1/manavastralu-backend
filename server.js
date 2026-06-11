@@ -12,7 +12,13 @@ const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
+app.get("/", (req, res) => {
+  res.send("Backend Running");
+});
 
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok" });
+});
 // ── CORS ──────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   "https://manavastralu.com",
