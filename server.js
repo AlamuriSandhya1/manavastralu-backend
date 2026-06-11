@@ -71,11 +71,10 @@ const upload = multer({ storage: cloudStorage });
 // ── MongoDB ───────────────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db";
 
-mongoose.connect(MONGO_URI)
+mongoose.connect(MONGO_URI, { family: 4 })
   .then(() => console.log("✅ Mongoose connected"))
   .catch(err => console.error("❌ Mongoose error:", err.message));
-
-const mongoClient = new MongoClient(MONGO_URI);
+const mongoClient = new MongoClient(MONGO_URI, { family: 4 });
 let db;
 
 async function connectDB() {
