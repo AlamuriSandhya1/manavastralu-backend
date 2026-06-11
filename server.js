@@ -660,7 +660,13 @@ app.use((err, req, res, next) => {
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
+console.log("========== SERVER START ==========");
+console.log("PORT =", process.env.PORT);
+console.log("NODE_ENV =", process.env.NODE_ENV);
+console.log("MONGODB_URI =", process.env.MONGODB_URI ? "FOUND" : "MISSING");
+
 const PORT = process.env.PORT || 8000;
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
