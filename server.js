@@ -13,6 +13,13 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
 app.get("/", (req, res) => {
+  res.send("ROOT WORKING");
+});
+
+app.get("/test", (req, res) => {
+  res.send("TEST WORKING");
+});
+app.get("/", (req, res) => {
   res.send("Backend Running");
 });
 
@@ -651,4 +658,6 @@ process.on("unhandledRejection", (reason) => {
 //  START
 // ═══════════════════════════════════════════════════════
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
