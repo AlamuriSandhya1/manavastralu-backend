@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 const express    = require("express");
 const cors       = require("cors");
@@ -13,7 +12,31 @@ const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
-app.use(cors());
+
+// ── CORS — allow frontend origins explicitly ──────────
+const ALLOWED_ORIGINS = [
+  "https://manavastralu.com",
+  "https://www.manavastralu.com",
+  "http://localhost:3000",
+  "http://localhost:3001",
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, curl)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    console.warn("⚠️  CORS blocked:", origin);
+    callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+  methods:     ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+}));
+
+// Handle preflight for all routes
+app.options("*", cors());
+
 app.use(express.json());
 
 // ── Upload folder (local fallback) ────────────────────
@@ -38,15 +61,14 @@ const cloudStorage = new CloudinaryStorage({
 const upload = multer({ storage: cloudStorage });
 
 // ── MongoDB connection string ─────────────────────────
-// ✅ Use Atlas URI if set, otherwise local
 const MONGO_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db";
 
-// ── Mongoose (single connection, no duplicate) ────────
+// ── Mongoose ──────────────────────────────────────────
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ Mongoose connected"))
   .catch(err => console.error("❌ Mongoose error:", err.message));
 
-// ── MongoDB Native client (single instance) ───────────
+// ── MongoDB Native client ─────────────────────────────
 const mongoClient = new MongoClient(MONGO_URI);
 let db;
 
@@ -58,7 +80,7 @@ async function connectDB() {
   } catch (err) {
     console.error("❌ MongoDB connection failed:", err.message);
     console.log("   Retrying in 10 seconds...");
-    setTimeout(connectDB, 10000); // retry, don't crash
+    setTimeout(connectDB, 10000);
   }
 }
 connectDB();
@@ -159,7 +181,7 @@ app.post("/add-address", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-//  PRODUCTS  (specific routes BEFORE /:id)
+//  PRODUCTS
 // ═══════════════════════════════════════════════════════
 app.get("/api/products", async (req, res) => {
   try {
@@ -197,7 +219,6 @@ app.post("/api/products", upload.fields([
     const { name, description, price, originalPrice,
             sizes, fabric, color, stock, category, colorVariants } = req.body;
 
-    // ✅ Cloudinary: use f.path (secure_url). Local: use uploads/ + filename
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
     const images = (req.files["images"] || []).map(getUrl).filter(Boolean);
 
@@ -240,7 +261,9 @@ app.put("/api/products/:id", async (req, res) => {
       name, description,
       price: Number(price), originalPrice: Number(originalPrice),
       sizes: typeof sizes === "string" ? JSON.parse(sizes) : sizes,
-      colorVariants: typeof colorVariants === "string" ? JSON.parse(colorVariants) : (colorVariants || []),
+      colorVariants: typeof colorVariants === "string"
+        ? JSON.parse(colorVariants)
+        : (colorVariants || []),
       fabric, color, category,
       stock:   Number(stock),
       soldOut: Number(stock) === 0 ? true : Boolean(soldOut),
@@ -316,17 +339,27 @@ app.post("/add-order", async (req, res) => {
       const product = await Product.findById(item.productId).catch(() => null);
       if (!product) continue;
       const newStock = Math.max(0, product.stock - item.quantity);
-      await Product.findByIdAndUpdate(item.productId, { stock: newStock, soldOut: newStock === 0 });
+      await Product.findByIdAndUpdate(item.productId, {
+        stock: newStock, soldOut: newStock === 0,
+      });
     }
 
     // Send emails (non-blocking)
     Promise.all([
-      sendCustomerEmail({ email, orderId: order._id, products: normalizedProducts,
-        totalAmount: finalTotal, address: address || {}, paymentMethod: finalPayMethod })
-        .catch(e => console.error("Customer email:", e.message)),
-      sendAdminEmail({ email, orderId: order._id, products: normalizedProducts,
-        totalAmount: finalTotal, address: address || {}, paymentMethod: finalPayMethod })
-        .catch(e => console.error("Admin email:", e.message)),
+      sendCustomerEmail({
+        email, orderId: order._id,
+        products: normalizedProducts,
+        totalAmount: finalTotal,
+        address: address || {},
+        paymentMethod: finalPayMethod,
+      }).catch(e => console.error("Customer email:", e.message)),
+      sendAdminEmail({
+        email, orderId: order._id,
+        products: normalizedProducts,
+        totalAmount: finalTotal,
+        address: address || {},
+        paymentMethod: finalPayMethod,
+      }).catch(e => console.error("Admin email:", e.message)),
     ]);
 
     res.status(201).json({ success: true, orderId: order._id });
@@ -347,42 +380,63 @@ app.get("/my-orders/:email", async (req, res) => {
 //  ADMIN
 // ═══════════════════════════════════════════════════════
 app.get("/api/admin/users", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  if (req.query.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
   try { res.json(await User.find().sort({ lastLogin: -1 })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/orders", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  if (req.query.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
   try { res.json(await Order.find().sort({ createdAt: -1 })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put("/api/admin/orders/:id", async (req, res) => {
-  if (req.body.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  if (req.body.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
   try {
-    const updated = await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status: req.body.status },
+      { new: true }
+    );
     res.json(updated);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/products", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  if (req.query.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
   try { res.json(await Product.find().sort({ createdAt: -1 })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/stock-alerts", async (req, res) => {
   try {
-    const list = await Product.find();
+    const list   = await Product.find();
     const alerts = [];
     list.forEach(p => {
       if (p.colorVariants?.length > 0) {
         p.colorVariants.forEach(v => {
-          if (v.stock <= 3) alerts.push({ productId:p._id, productName:p.name, color:v.name, stock:v.stock, soldOut:v.stock===0 });
+          if (v.stock <= 3)
+            alerts.push({
+              productId:   p._id,
+              productName: p.name,
+              color:       v.name,
+              stock:       v.stock,
+              soldOut:     v.stock === 0,
+            });
         });
       } else if (p.stock <= 3) {
-        alerts.push({ productId:p._id, productName:p.name, color:p.color||"—", stock:p.stock, soldOut:p.soldOut });
+        alerts.push({
+          productId:   p._id,
+          productName: p.name,
+          color:       p.color || "—",
+          stock:       p.stock,
+          soldOut:     p.soldOut,
+        });
       }
     });
     res.json(alerts);
@@ -390,12 +444,19 @@ app.get("/api/admin/stock-alerts", async (req, res) => {
 });
 
 app.put("/api/admin/orders/:id/tracking", async (req, res) => {
-  if (req.body.password !== ADMIN_PASS) return res.status(401).json({ error: "Unauthorized" });
+  if (req.body.password !== ADMIN_PASS)
+    return res.status(401).json({ error: "Unauthorized" });
   try {
     const { courierName, trackingNumber, estimatedDelivery, status } = req.body;
     const trackingUrl = `https://www.google.com/search?q=${courierName}+tracking+${trackingNumber}`;
-    const updated = await Order.findByIdAndUpdate(req.params.id,
-      { courierName, trackingNumber, trackingUrl, estimatedDelivery, status: status||"Shipped", shippedAt: new Date() },
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      {
+        courierName, trackingNumber, trackingUrl,
+        estimatedDelivery,
+        status:     status || "Shipped",
+        shippedAt:  new Date(),
+      },
       { new: true }
     );
     res.json({ success: true, order: updated });
@@ -405,7 +466,8 @@ app.put("/api/admin/orders/:id/tracking", async (req, res) => {
 // ═══════════════════════════════════════════════════════
 //  ADMIN 2FA OTP
 // ═══════════════════════════════════════════════════════
-const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateOTP = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
 
 app.post("/api/admin/request-otp", async (req, res) => {
   const { password } = req.body;
@@ -421,18 +483,28 @@ app.post("/api/admin/request-otp", async (req, res) => {
     const nodemailer  = require("nodemailer");
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com", port: 465, secure: true,
-      auth: { user: process.env.GMAIL_USER, pass: (process.env.GMAIL_PASS||"").replace(/\s/g,"") },
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: (process.env.GMAIL_PASS || "").replace(/\s/g, ""),
+      },
       tls: { rejectUnauthorized: false },
     });
     await transporter.sendMail({
       from:    `"Mana Vastralu Security" <${process.env.GMAIL_USER}>`,
       to:      adminEmail,
       subject: `🔐 Admin OTP: ${otp} — Mana Vastralu`,
-      html:    `<div style="background:#1a1008;padding:32px;font-family:Arial">
-        <h2 style="color:#c8a04a">Admin Login OTP</h2>
-        <div style="font-size:40px;font-weight:700;color:#c8a04a;letter-spacing:10px;font-family:monospace;background:#0f0a04;padding:20px;text-align:center;border-radius:8px;border:2px solid #c8a04a">${otp}</div>
-        <p style="color:#7a5a30;margin-top:16px">Valid for 5 minutes. Do not share this OTP.</p>
-      </div>`,
+      html: `
+        <div style="background:#1a1008;padding:32px;font-family:Arial">
+          <h2 style="color:#c8a04a">Admin Login OTP</h2>
+          <div style="font-size:40px;font-weight:700;color:#c8a04a;letter-spacing:10px;
+                      font-family:monospace;background:#0f0a04;padding:20px;
+                      text-align:center;border-radius:8px;border:2px solid #c8a04a">
+            ${otp}
+          </div>
+          <p style="color:#7a5a30;margin-top:16px">
+            Valid for 5 minutes. Do not share this OTP.
+          </p>
+        </div>`,
     });
     console.log(`✅ OTP sent to ${adminEmail}`);
     res.json({ success: true, message: `OTP sent to ${adminEmail}` });
@@ -443,15 +515,19 @@ app.post("/api/admin/request-otp", async (req, res) => {
 });
 
 app.post("/api/admin/verify-otp", (req, res) => {
-  const { otp } = req.body;
+  const { otp }    = req.body;
   const adminEmail = process.env.ADMIN_EMAIL || process.env.GMAIL_USER;
   const stored     = otpStore[adminEmail];
-  if (!stored)              return res.status(400).json({ success:false, message:"No OTP requested." });
+
+  if (!stored)
+    return res.status(400).json({ success: false, message: "No OTP requested." });
   if (Date.now() > stored.expiresAt) {
     delete otpStore[adminEmail];
-    return res.status(400).json({ success:false, message:"OTP expired." });
+    return res.status(400).json({ success: false, message: "OTP expired." });
   }
-  if (stored.otp !== otp.trim()) return res.status(400).json({ success:false, message:"Incorrect OTP." });
+  if (stored.otp !== otp.trim())
+    return res.status(400).json({ success: false, message: "Incorrect OTP." });
+
   delete otpStore[adminEmail];
   const sessionToken = crypto.randomBytes(32).toString("hex");
   otpStore[`session_${sessionToken}`] = { expiresAt: Date.now() + 2 * 60 * 60 * 1000 };
@@ -467,8 +543,8 @@ app.post("/chat", async (req, res) => {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role:"system", content:"You are a helpful assistant for an online saree shopping store." },
-        { role:"user",   content:req.body.message },
+        { role: "system", content: "You are a helpful assistant for an online saree shopping store." },
+        { role: "user",   content: req.body.message },
       ],
     });
     res.json({ reply: response.choices[0].message.content });
@@ -478,11 +554,10 @@ app.post("/chat", async (req, res) => {
 // ── Handle unhandled rejections (prevent crashes) ─────
 process.on("unhandledRejection", (reason) => {
   console.error("⚠️  Unhandled rejection:", reason?.message || reason);
-  // Don't crash — just log
 });
 
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
-app.listen(8000, () => console.log("🚀 Server running on http://localhost:8000"));
-
+const PORT = process.env.PORT || 8000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
