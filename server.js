@@ -69,27 +69,23 @@ const cloudStorage = new CloudinaryStorage({
 const upload = multer({ storage: cloudStorage });
 
 // ── MongoDB ───────────────────────────────────────────
-const MONGO_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/silks_db";
-
-mongoose.connect(MONGO_URI, { family: 4 })
+mongoose.connect(process.env.MONGODB_URI, {
+  tls: true,
+  tlsInsecure: true,           // ← add this
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS: 45000,
+  family: 4,                   // ← force IPv4, fixes Railway SSL issues
+})
   .then(() => console.log("✅ Mongoose connected"))
-  .catch(err => console.error("❌ Mongoose error:", err.message));
-const mongoClient = new MongoClient(MONGO_URI, { family: 4 });
-let db;
+  .catch(err => console.error("Mongoose error:", err.message));
 
-async function connectDB() {
-  try {
-    await mongoClient.connect();
-    db = mongoClient.db("silks_db");
-    console.log("✅ MongoDB native connected");
-  } catch (err) {
-    console.error("❌ MongoDB connection failed:", err.message);
-    console.log("   Retrying in 10 seconds...");
-    setTimeout(connectDB, 10000);
-  }
-}
-connectDB();
-
+const mongoClient = new MongoClient(process.env.MONGODB_URI, {
+  tls: true,
+  tlsInsecure: true,           // ← add this
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS: 45000,
+  family: 4,                   // ← force IPv4
+});
 const usersCol     = () => db?.collection("users");
 const addressesCol = () => db?.collection("addresses");
 
