@@ -24,7 +24,7 @@
     "mongoose": "^8.9.0",
     "multer": "^2.1.1",
     "multer-storage-cloudinary": "^4.0.0",
-    "nodemailer": "^8.0.10",
+    "nodemailer": "^8.0.11",
     "nodemon": "^3.1.14",
     "openai": "^6.27.0",
     "razorpay": "^2.9.6"
