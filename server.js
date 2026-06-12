@@ -57,20 +57,26 @@ const cloudStorage = new CloudinaryStorage({
 const upload = multer({ storage: cloudStorage });
 
 // ── MongoDB ───────────────────────────────────────────
-const MONGO_URI = process.env.MONGODB_URI;
-
-mongoose.connect(MONGO_URI, {
+// ── Mongoose ──────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS:          45000,
-  family: 4,
+  ssl:                      true,
+  tls:                      true,
+  tlsInsecure:              true,
+  family:                   4,
 })
   .then(() => console.log("✅ Mongoose connected"))
-  .catch(err => console.error("❌ Mongoose error:", err.message));
+  .catch(err => console.error("Mongoose error:", err.message));
 
-const mongoClient = new MongoClient(MONGO_URI, {
+// ── MongoClient ───────────────────────────────────────
+const mongoClient = new MongoClient(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS:          45000,
-  family: 4,
+  ssl:                      true,
+  tls:                      true,
+  tlsInsecure:              true,
+  family:                   4,
 });
 
 let db;
