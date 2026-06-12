@@ -12,7 +12,10 @@ const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 const app = express();
-
+app.use((req, res, next) => {
+  console.log("REQUEST:", req.method, req.url);
+  next();
+});
 // ── CORS ──────────────────────────────────────────────
 app.use(cors({
   origin: (origin, cb) => cb(null, true), // allow all origins
@@ -128,10 +131,9 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    status:    "ok",
-    mongo:     mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
+  console.log("HEALTH ROUTE HIT");
+  res.status(200).json({
+    status: "ok"
   });
 });
 
