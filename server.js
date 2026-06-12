@@ -213,39 +213,79 @@ app.get("/api/products/:id", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post("/api/products", upload.fields([
-  { name:"images", maxCount:4 },
-  { name:"variantImages", maxCount:20 },
-]), async (req, res) => {
+app.post("/api/products", (req, res, next) => {
+  upload.fields([
+    { name:"images",        maxCount:4  },
+    { name:"variantImages", maxCount:20 },
+  ])(req, res, (err) => {
+    if (err) {
+      console.error("❌ Multer/Cloudinary upload error:", err.message);
+      return res.status(500).json({ error: "Image upload failed: " + err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
-    const { name, description, price, originalPrice,
-            sizes, fabric, color, stock, category, colorVariants } = req.body;
+    const {
+      name, description, price, originalPrice,
+      sizes, fabric, color, stock, category, colorVariants,
+    } = req.body;
+
+    if (!name || !price) {
+      return res.status(400).json({ error: "Name and price are required" });
+    }
+
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
     const images = (req.files?.["images"] || []).map(getUrl).filter(Boolean);
+
+    console.log("📦 Creating product:", name, "| images:", images.length);
+
     let parsedVariants = [];
     if (colorVariants) {
-      const variantFiles = req.files?.["variantImages"] || [];
-      parsedVariants = JSON.parse(colorVariants)
-        .map((v, i) => ({
-          name: v.name, stock: Number(v.stock) || 10,
-          image: variantFiles[i] ? getUrl(variantFiles[i]) : (images[0] || ""),
-        }))
-        .filter(v => v.name.trim() !== "");
+      try {
+        const variantFiles = req.files?.["variantImages"] || [];
+        parsedVariants = JSON.parse(colorVariants)
+          .map((v, i) => ({
+            name:  v.name,
+            stock: Number(v.stock) || 10,
+            image: variantFiles[i] ? getUrl(variantFiles[i]) : (images[0] || ""),
+          }))
+          .filter(v => v.name.trim() !== "");
+      } catch (e) {
+        console.warn("⚠️ colorVariants parse failed:", e.message);
+      }
     }
+
+    let parsedSizes = [];
+    try {
+      parsedSizes = sizes
+        ? (typeof sizes === "string" && sizes.startsWith("[")
+            ? JSON.parse(sizes)
+            : sizes.split(",").map(s => s.trim()).filter(Boolean))
+        : [];
+    } catch { parsedSizes = []; }
+
     const product = await Product.create({
-      name, description,
+      name:          name.trim(),
+      description:   description || "",
       price:         Number(price),
       originalPrice: Number(originalPrice) || Number(price),
-      sizes:         sizes ? JSON.parse(sizes) : [],
+      sizes:         parsedSizes,
       colorVariants: parsedVariants,
-      fabric,
-      color: color || parsedVariants.map(v => v.name).join(", ") || "ALL COLOURS",
-      category, stock: Number(stock) || 10, images,
+      fabric:        fabric || "",
+      color:         color || parsedVariants.map(v => v.name).join(", ") || "ALL COLOURS",
+      category:      category || "",
+      stock:         Number(stock) || 10,
+      images,
     });
-    res.json(product);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 
+    console.log("✅ Product created:", product._id);
+    res.json(product);
+  } catch (err) {
+    console.error("❌ Add product error:", err.message, err.stack);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.put("/api/products/:id", async (req, res) => {
   try {
     const { name, description, price, originalPrice,
@@ -430,7 +470,14 @@ app.get("/api/admin/stock-alerts", async (req, res) => {
     res.json(alerts);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
+app.get("/api/test-cloudinary", async (req, res) => {
+  try {
+    const result = await cloudinary.api.ping();
+    res.json({ success: true, cloudinary: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ═══════════════════════════════════════════════════════
 //  ADMIN OTP
 // ═══════════════════════════════════════════════════════
