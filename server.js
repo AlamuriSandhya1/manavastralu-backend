@@ -642,7 +642,18 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   console.error("⚠️ Uncaught exception:", err.message);
 });
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Manavastralu Backend Running"
+  });
+});
 
+app.get("/api/health", (req, res) => {
+  res.status(200).json({
+    status: "OK"
+  });
+});
 // ═══════════════════════════════════════════════════════
 //  START — bind to 0.0.0.0 for Railway
 // ═══════════════════════════════════════════════════════
