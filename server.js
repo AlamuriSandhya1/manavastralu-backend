@@ -27,25 +27,18 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 // ── CORS ──────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-  "https://manavastralu.com",
-  "https://www.manavastralu.com",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    console.warn("⚠️  CORS blocked:", origin);
-    callback(new Error("Not allowed by CORS"));
-  },
-  credentials:    true,
-  methods:        ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
+  origin: [
+    "https://manavastralu.com",
+    "https://www.manavastralu.com",
+    "http://localhost:3000",
+    "http://localhost:5000",
+  ],
+  credentials: true,
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization","x-admin-token"],
 }));
-
+app.options("*", cors());
 // ✅ FIX — replaces app.options("*", cors()) which crashes newer Express
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
@@ -649,15 +642,15 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ── Prevent unhandled rejections from crashing server ─
+// ── Prevent unhandled rejections ─────────────────────
 process.on("unhandledRejection", (reason) => {
-  console.error("⚠️  Unhandled rejection:", reason?.message || reason);
+  console.error("⚠️ Unhandled rejection:", reason?.message || reason);
 });
 
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
