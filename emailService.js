@@ -1,15 +1,14 @@
+// backend/emailService.js
+require("dotenv").config();
 const nodemailer = require("nodemailer");
 
-// ── Transporter ───────────────────────────────────────
 const createTransporter = () => {
   const user = process.env.GMAIL_USER;
   const pass = (process.env.GMAIL_PASS || "").replace(/\s/g, "");
-
   if (!user || !pass) {
-    console.error("❌ Email: GMAIL_USER or GMAIL_PASS not set in environment");
+    console.error("❌ GMAIL_USER or GMAIL_PASS missing");
     return null;
   }
-
   return nodemailer.createTransport({
     host:   "smtp.gmail.com",
     port:   465,
@@ -19,350 +18,255 @@ const createTransporter = () => {
   });
 };
 
-// ── Test connection on startup ─────────────────────────
-const transporter = createTransporter();
-if (transporter) {
-  transporter.verify((err) => {
-    if (err) console.error("❌ Gmail SMTP verify failed:", err.message);
-    else     console.log("✅ Gmail SMTP ready — emails will be sent");
-  });
-}
+// Verify on startup
+const verifyEmail = async () => {
+  const t = createTransporter();
+  if (!t) return;
+  try {
+    await t.verify();
+    console.log("✅ Gmail SMTP ready —", process.env.GMAIL_USER);
+  } catch (err) {
+    console.error("❌ Gmail SMTP failed:", err.message);
+    console.error("   Fix: Check GMAIL_USER and GMAIL_PASS in environment variables");
+  }
+};
+verifyEmail();
 
-// ── Helper ────────────────────────────────────────────
 const sendMail = async ({ to, subject, html }) => {
   const t = createTransporter();
-  if (!t) throw new Error("Email transporter not configured");
-
+  if (!t) throw new Error("Email not configured");
   const info = await t.sendMail({
-    from:    `"Mana Vastralu" <${process.env.GMAIL_USER}>`,
-    to,
-    subject,
-    html,
+    from: `"Mana Vastralu" <${process.env.GMAIL_USER}>`,
+    to, subject, html,
   });
-  console.log(`✅ Email sent to ${to} — MessageId: ${info.messageId}`);
+  console.log(`✅ Email sent → ${to}`);
   return info;
+};
+
+const STORE_URL = process.env.STORE_URL || "https://manavastralu.com";
+
+const formatAddress = (addr) => {
+  if (!addr || typeof addr !== "object") return "Not provided";
+  return [addr.fullName || addr.name, addr.phone,
+          addr.houseNo, addr.landmark, addr.village,
+          addr.district, addr.state, addr.pincode]
+    .filter(Boolean).join(", ");
 };
 
 // ══════════════════════════════════════════════════════
 //  OTP EMAIL
 // ══════════════════════════════════════════════════════
 const sendOTPEmail = async (toEmail, otp) => {
+  console.log(`📧 Sending OTP to ${toEmail}...`);
   await sendMail({
     to:      toEmail,
-    subject: `🔐 Your Admin OTP: ${otp} — Mana Vastralu`,
-    html: `
-      <div style="font-family:Arial,sans-serif;background:#0f0a04;padding:40px;
-                  max-width:480px;margin:0 auto;border-radius:12px">
-        <div style="text-align:center;margin-bottom:24px">
-          <h1 style="color:#c8a04a;font-size:22px;margin:0">🥻 Mana Vastralu</h1>
-          <p style="color:#7a5a30;font-size:12px;letter-spacing:2px;
-                    text-transform:uppercase;margin:4px 0 0">Admin Security</p>
-        </div>
-        <div style="background:#1a1008;border:1px solid rgba(200,160,74,0.2);
-                    border-radius:10px;padding:28px;text-align:center">
-          <p style="color:#9a7050;font-size:14px;margin:0 0 16px">
-            Your one-time admin login code:
-          </p>
-          <div style="font-size:44px;font-weight:700;color:#c8a04a;
-                      letter-spacing:14px;font-family:monospace;
-                      background:#0f0a04;padding:20px;border-radius:8px;
-                      border:2px solid rgba(200,160,74,0.4)">
-            ${otp}
-          </div>
-          <p style="color:#5a3a10;font-size:12px;margin:16px 0 0">
-            ⏱ Valid for <strong style="color:#c8a04a">5 minutes</strong> only.<br/>
-            Never share this code with anyone.
-          </p>
-        </div>
-        <p style="color:#3a2a08;font-size:11px;text-align:center;margin-top:20px">
-          If you didn't request this, ignore this email.
-        </p>
-      </div>`,
+    subject: `🔐 Admin OTP: ${otp} — Mana Vastralu`,
+    html: `<!DOCTYPE html><html>
+<body style="margin:0;padding:20px;background:#0f0a04;font-family:Arial,sans-serif">
+<div style="max-width:440px;margin:0 auto;background:#1a1008;border-radius:12px;overflow:hidden">
+  <div style="background:linear-gradient(135deg,#c8a04a,#8b5e1a);padding:20px 24px;text-align:center">
+    <h1 style="color:#1a1008;font-size:20px;margin:0;font-family:Georgia,serif">🥻 Mana Vastralu</h1>
+    <p style="color:#5a3a0a;font-size:10px;margin:3px 0 0;letter-spacing:2px;text-transform:uppercase">Admin Security</p>
+  </div>
+  <div style="padding:28px;text-align:center">
+    <p style="color:#9a7050;font-size:14px;margin:0 0 20px">Your one-time admin login code:</p>
+    <div style="background:#0f0a04;border:2px solid #c8a04a;border-radius:10px;padding:22px;margin-bottom:16px">
+      <div style="font-size:44px;font-weight:900;color:#c8a04a;letter-spacing:14px;font-family:monospace">${otp}</div>
+    </div>
+    <p style="color:#7a5a30;font-size:12px;margin:0 0 6px">⏱ Valid for <strong style="color:#c8a04a">5 minutes</strong> only</p>
+    <p style="color:#5a3a10;font-size:11px;margin:0">Never share this code with anyone.</p>
+  </div>
+  <div style="background:#0f0a04;padding:12px;text-align:center">
+    <p style="color:#3a2a08;font-size:10px;margin:0">If you didn't request this, ignore this email.</p>
+  </div>
+</div>
+</body></html>`,
   });
 };
 
 // ══════════════════════════════════════════════════════
-//  CUSTOMER ORDER CONFIRMATION EMAIL
+//  CUSTOMER ORDER CONFIRMATION
 // ══════════════════════════════════════════════════════
-const sendCustomerEmail = async ({
-  email, orderId, products: items, totalAmount, address, paymentMethod,
-}) => {
+const sendCustomerEmail = async ({ email, orderId, products: items, totalAmount, address, paymentMethod }) => {
   if (!email || email === "guest@gmail.com") return;
+  console.log(`📧 Sending order confirmation to ${email}...`);
 
-  const addr = address || {};
-  const addressLine = [
-    addr.fullName || addr.name,
-    addr.houseNo  || addr.street,
-    addr.landmark,
-    addr.village  || addr.city,
-    addr.district,
-    addr.state,
-    addr.pincode ? `— ${addr.pincode}` : "",
-  ].filter(Boolean).join(", ");
+  const addr     = address || {};
+  const shortId  = String(orderId).slice(-6).toUpperCase();
+  const total    = Number(totalAmount||0).toLocaleString("en-IN");
+  const addrText = formatAddress(addr);
+  const date     = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
 
-  const itemRows = (items || []).map(item => `
+  const itemRows = (items||[]).map(item => `
     <tr>
-      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08">
+      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08;width:70px">
         ${item.image
-          ? `<img src="${item.image}" width="56" height="64"
-               style="object-fit:cover;border-radius:4px;vertical-align:middle"/>`
-          : "🥻"}
+          ? `<img src="${item.image}" width="56" height="66" style="object-fit:cover;border-radius:4px;border:1px solid #3a2a10;display:block">`
+          : `<div style="width:56px;height:66px;background:#2a1a08;border-radius:4px;text-align:center;line-height:66px;font-size:22px">🥻</div>`}
       </td>
-      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08;color:#e8d5a3">
-        <strong>${item.name || "—"}</strong><br/>
-        <span style="font-size:11px;color:#7a5a30">
-          ${item.selectedSize || item.size ? `Size: ${item.selectedSize || item.size}` : ""}
+      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08">
+        <div style="color:#e8d5a3;font-weight:700;font-size:13px">${item.name||"—"}</div>
+        <div style="color:#7a5a30;font-size:11px;margin-top:3px">
+          ${item.selectedSize||item.size ? `Size: ${item.selectedSize||item.size}` : ""}
           ${item.color ? ` · ${item.color}` : ""}
-        </span>
+        </div>
+        <div style="color:#5a3a10;font-size:11px;margin-top:2px">Qty: ${item.quantity||1}</div>
       </td>
-      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08;
-                 color:#c8a04a;text-align:center">
-        × ${item.quantity || 1}
-      </td>
-      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08;
-                 color:#c8a04a;text-align:right;font-weight:700">
-        ₹${(Number(item.price || 0) * (item.quantity || 1)).toLocaleString("en-IN")}
+      <td style="padding:10px 12px;border-bottom:1px solid #2a1a08;text-align:right;vertical-align:top">
+        <div style="color:#c8a04a;font-weight:700;font-size:14px">₹${(Number(item.price||0)*(item.quantity||1)).toLocaleString("en-IN")}</div>
       </td>
     </tr>`).join("");
 
   await sendMail({
     to:      email,
-    subject: `✅ Order Confirmed #${String(orderId).slice(-6).toUpperCase()} — Mana Vastralu`,
-    html: `
-      <div style="font-family:Arial,sans-serif;background:#0f0a04;
-                  max-width:560px;margin:0 auto;border-radius:12px;overflow:hidden">
+    subject: `✅ Order Confirmed #${shortId} — Mana Vastralu`,
+    html: `<!DOCTYPE html><html>
+<body style="margin:0;padding:20px;background:#f5f0ea;font-family:Arial,sans-serif">
+<div style="max-width:540px;margin:0 auto;background:#1a1008;border-radius:12px;overflow:hidden">
 
-        <!-- HEADER -->
-        <div style="background:linear-gradient(135deg,#1a1008,#2a1508);
-                    padding:32px;text-align:center;
-                    border-bottom:2px solid rgba(200,160,74,0.3)">
-          <h1 style="color:#c8a04a;font-family:Georgia,serif;
-                     font-size:24px;margin:0 0 4px">🥻 Mana Vastralu</h1>
-          <p style="color:#7a5a30;font-size:11px;letter-spacing:2px;
-                    text-transform:uppercase;margin:0">Mana Gurthimpu</p>
-        </div>
+  <div style="background:linear-gradient(135deg,#c8a04a,#8b5e1a);padding:24px;text-align:center">
+    <h1 style="color:#1a1008;font-family:Georgia,serif;font-size:22px;margin:0 0 3px">🥻 Mana Vastralu</h1>
+    <p style="color:#5a3a0a;font-size:10px;margin:0;letter-spacing:2px;text-transform:uppercase">Mana Gurthimpu</p>
+  </div>
 
-        <div style="padding:28px">
+  <div style="padding:24px">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:44px;margin-bottom:8px">🎉</div>
+      <h2 style="color:#e8d5a3;font-family:Georgia,serif;font-size:20px;margin:0 0 6px">Order Confirmed!</h2>
+      <p style="color:#9a7050;font-size:12px;margin:0">Thank you for shopping with Mana Vastralu</p>
+    </div>
 
-          <!-- THANK YOU -->
-          <div style="text-align:center;margin-bottom:24px">
-            <div style="font-size:48px;margin-bottom:8px">🎉</div>
-            <h2 style="color:#e8d5a3;font-family:Georgia,serif;
-                       font-size:20px;margin:0 0 6px">
-              Thank you for your order!
-            </h2>
-            <p style="color:#9a7050;font-size:13px;margin:0">
-              Your order has been confirmed and is being processed.
-            </p>
-          </div>
+    <!-- ORDER META -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0a04;border:1px solid rgba(200,160,74,0.2);border-radius:8px;margin-bottom:18px">
+      <tr>
+        <td style="padding:10px 14px;border-right:1px solid rgba(200,160,74,0.1)">
+          <div style="color:#7a5a30;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Order ID</div>
+          <div style="color:#c8a04a;font-weight:700;font-size:13px;font-family:monospace">#${shortId}</div>
+        </td>
+        <td style="padding:10px 14px;border-right:1px solid rgba(200,160,74,0.1)">
+          <div style="color:#7a5a30;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Date</div>
+          <div style="color:#e8d5a3;font-size:12px">${date}</div>
+        </td>
+        <td style="padding:10px 14px;border-right:1px solid rgba(200,160,74,0.1)">
+          <div style="color:#7a5a30;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Payment</div>
+          <div style="color:#e8d5a3;font-size:12px">${paymentMethod||"Online"}</div>
+        </td>
+        <td style="padding:10px 14px">
+          <div style="color:#7a5a30;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Total</div>
+          <div style="color:#c8a04a;font-weight:700;font-size:16px">₹${total}</div>
+        </td>
+      </tr>
+    </table>
 
-          <!-- ORDER INFO STRIP -->
-          <div style="background:#1a1008;border:1px solid rgba(200,160,74,0.2);
-                      border-radius:8px;padding:16px;margin-bottom:20px;
-                      display:flex;justify-content:space-between">
-            <table width="100%" cellpadding="0" cellspacing="0">
-              <tr>
-                <td style="color:#7a5a30;font-size:11px;
-                           text-transform:uppercase;letter-spacing:1px">Order ID</td>
-                <td style="color:#7a5a30;font-size:11px;
-                           text-transform:uppercase;letter-spacing:1px">Date</td>
-                <td style="color:#7a5a30;font-size:11px;
-                           text-transform:uppercase;letter-spacing:1px">Payment</td>
-                <td style="color:#7a5a30;font-size:11px;
-                           text-transform:uppercase;letter-spacing:1px">Status</td>
-              </tr>
-              <tr>
-                <td style="color:#c8a04a;font-weight:700;font-size:13px;padding-top:4px">
-                  #${String(orderId).slice(-6).toUpperCase()}
-                </td>
-                <td style="color:#e8d5a3;font-size:13px;padding-top:4px">
-                  ${new Date().toLocaleDateString("en-IN", {
-                    day:"2-digit", month:"short", year:"numeric"
-                  })}
-                </td>
-                <td style="color:#e8d5a3;font-size:13px;padding-top:4px">
-                  ${paymentMethod || "COD"}
-                </td>
-                <td style="padding-top:4px">
-                  <span style="background:rgba(74,222,128,0.15);color:#4ade80;
-                               padding:2px 10px;border-radius:12px;
-                               font-size:11px;font-weight:700">
-                    ✓ Confirmed
-                  </span>
-                </td>
-              </tr>
-            </table>
-          </div>
+    <!-- ITEMS -->
+    <div style="color:#c8a04a;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">Items Ordered</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0a04;border:1px solid rgba(200,160,74,0.15);border-radius:8px;border-collapse:collapse;margin-bottom:18px">
+      <tbody>${itemRows}</tbody>
+      <tr style="background:rgba(200,160,74,0.08)">
+        <td colspan="2" style="padding:12px 14px;color:#9a7050;font-size:12px;text-align:right;font-weight:600">Total Amount</td>
+        <td style="padding:12px 14px;text-align:right">
+          <div style="color:#c8a04a;font-size:20px;font-weight:700;font-family:Georgia,serif">₹${total}</div>
+        </td>
+      </tr>
+    </table>
 
-          <!-- ITEMS TABLE -->
-          <h3 style="color:#c8a04a;font-size:13px;text-transform:uppercase;
-                     letter-spacing:1px;margin:0 0 10px">Items Ordered</h3>
-          <table width="100%" cellpadding="0" cellspacing="0"
-            style="background:#1a1008;border:1px solid rgba(200,160,74,0.15);
-                   border-radius:8px;border-collapse:collapse;margin-bottom:20px">
-            <thead>
-              <tr style="background:rgba(200,160,74,0.1)">
-                <th style="padding:10px 12px;color:#7a5a30;font-size:10px;
-                           text-align:left;text-transform:uppercase;
-                           letter-spacing:1px;width:70px">Photo</th>
-                <th style="padding:10px 12px;color:#7a5a30;font-size:10px;
-                           text-align:left;text-transform:uppercase;letter-spacing:1px">
-                  Product</th>
-                <th style="padding:10px 12px;color:#7a5a30;font-size:10px;
-                           text-transform:uppercase;letter-spacing:1px">Qty</th>
-                <th style="padding:10px 12px;color:#7a5a30;font-size:10px;
-                           text-align:right;text-transform:uppercase;letter-spacing:1px">
-                  Price</th>
-              </tr>
-            </thead>
-            <tbody>${itemRows}</tbody>
-            <tfoot>
-              <tr>
-                <td colspan="3" style="padding:14px 12px;color:#9a7050;
-                                       font-size:13px;text-align:right">
-                  Total Amount
-                </td>
-                <td style="padding:14px 12px;color:#c8a04a;
-                           font-size:18px;font-weight:700;
-                           text-align:right;font-family:Georgia,serif">
-                  ₹${Number(totalAmount || 0).toLocaleString("en-IN")}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
+    <!-- ADDRESS -->
+    <div style="background:#0f0a04;border:1px solid rgba(200,160,74,0.15);border-radius:8px;padding:14px;margin-bottom:18px">
+      <div style="color:#c8a04a;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">📍 Delivery Address</div>
+      <div style="color:#9a7050;font-size:13px;line-height:1.8">${addrText}</div>
+    </div>
 
-          <!-- DELIVERY ADDRESS -->
-          ${addressLine ? `
-          <div style="background:#1a1008;border:1px solid rgba(200,160,74,0.15);
-                      border-radius:8px;padding:16px;margin-bottom:20px">
-            <h3 style="color:#c8a04a;font-size:12px;text-transform:uppercase;
-                       letter-spacing:1px;margin:0 0 10px">📍 Delivery Address</h3>
-            <p style="color:#9a7050;font-size:13px;line-height:1.8;margin:0">
-              <strong style="color:#e8d5a3">${addr.fullName || addr.name || ""}</strong><br/>
-              ${addr.phone ? `📞 ${addr.phone}<br/>` : ""}
-              ${addressLine}
-            </p>
-          </div>` : ""}
+    <!-- DELIVERY INFO -->
+    <div style="background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.15);border-radius:8px;padding:14px;margin-bottom:18px">
+      <div style="color:#4ade80;font-size:12px;font-weight:700">🚚 Estimated Delivery: 3–7 Business Days</div>
+      <div style="color:#5a8060;font-size:11px;margin-top:4px">Ships via DTDC · Easy 7-day returns</div>
+    </div>
 
-          <!-- WHAT'S NEXT -->
-          <div style="background:rgba(200,160,74,0.06);
-                      border:1px solid rgba(200,160,74,0.15);
-                      border-radius:8px;padding:16px;margin-bottom:20px">
-            <h3 style="color:#c8a04a;font-size:12px;text-transform:uppercase;
-                       letter-spacing:1px;margin:0 0 12px">📦 What happens next?</h3>
-            ${[
-              ["1", "Order Processing", "We're preparing your saree with care"],
-              ["2", "Quality Check",    "Each saree is inspected before shipping"],
-              ["3", "Shipped via DTDC","You'll receive a tracking number by email"],
-              ["4", "Delivery",        "Expected in 3–7 business days"],
-            ].map(([n, title, desc]) => `
-              <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start">
-                <span style="background:#c8a04a;color:#1a1008;width:20px;height:20px;
-                             border-radius:50%;display:inline-flex;align-items:center;
-                             justify-content:center;font-size:11px;font-weight:700;
-                             flex-shrink:0">${n}</span>
-                <div>
-                  <strong style="color:#e8d5a3;font-size:13px">${title}</strong><br/>
-                  <span style="color:#7a5a30;font-size:12px">${desc}</span>
-                </div>
-              </div>`).join("")}
-          </div>
+    <div style="text-align:center;padding-top:16px;border-top:1px solid rgba(200,160,74,0.08)">
+      <p style="color:#9a7050;font-size:11px;margin:0 0 4px">Questions? WhatsApp: <strong style="color:#c8a04a">7995869469</strong></p>
+      <p style="color:#9a7050;font-size:11px;margin:0">manavastralu@gmail.com</p>
+    </div>
+  </div>
 
-          <!-- FOOTER -->
-          <div style="text-align:center;padding-top:20px;
-                      border-top:1px solid rgba(200,160,74,0.1)">
-            <p style="color:#9a7050;font-size:12px;margin:0 0 8px">
-              Questions? Reply to this email or contact us on WhatsApp
-            </p>
-            <p style="color:#5a3a10;font-size:11px;margin:0">
-              © 2026 Mana Vastralu · manavastralu@gmail.com
-            </p>
-          </div>
-        </div>
-      </div>`,
+  <div style="background:#0f0a04;padding:12px;text-align:center">
+    <p style="color:#3a2a08;font-size:10px;margin:0">© 2026 Mana Vastralu · @mana_vastralu</p>
+  </div>
+</div>
+</body></html>`,
   });
 };
 
 // ══════════════════════════════════════════════════════
-//  ADMIN ORDER NOTIFICATION EMAIL
+//  ADMIN ORDER NOTIFICATION
 // ══════════════════════════════════════════════════════
-const sendAdminEmail = async ({
-  email, orderId, products: items, totalAmount, address, paymentMethod,
-}) => {
+const sendAdminEmail = async ({ email, orderId, products: items, totalAmount, address, paymentMethod }) => {
   const adminEmail = process.env.ADMIN_EMAIL || process.env.GMAIL_USER;
-  if (!adminEmail) return;
+  if (!adminEmail) { console.log("⚠️ ADMIN_EMAIL not set"); return; }
+  console.log(`📧 Sending admin notification to ${adminEmail}...`);
 
-  const addr        = address || {};
-  const addressLine = [
-    addr.fullName || addr.name,
-    addr.houseNo  || addr.street,
-    addr.village  || addr.city,
-    addr.district,
-    addr.state,
-    addr.pincode,
-    addr.phone ? `📞 ${addr.phone}` : "",
-  ].filter(Boolean).join(", ");
+  const shortId  = String(orderId).slice(-6).toUpperCase();
+  const total    = Number(totalAmount||0).toLocaleString("en-IN");
+  const addrText = formatAddress(address||{});
+  const date     = new Date().toLocaleString("en-IN");
 
-  const itemList = (items || []).map(item =>
-    `• ${item.name} × ${item.quantity || 1} ${item.selectedSize || item.size ? `(Size: ${item.selectedSize || item.size})` : ""} — ₹${(Number(item.price || 0) * (item.quantity || 1)).toLocaleString("en-IN")}`
-  ).join("\n");
+  const itemsList = (items||[]).map((item,i) =>
+    `<tr style="border-bottom:1px solid rgba(200,160,74,0.08)">
+      <td style="padding:8px 12px;color:#7a5a30;font-size:11px">${i+1}</td>
+      <td style="padding:8px 12px">
+        <div style="color:#e8d5a3;font-size:13px;font-weight:600">${item.name}</div>
+        <div style="color:#7a5a30;font-size:11px">${item.selectedSize||item.size?`Size: ${item.selectedSize||item.size}`:""}${item.color?` · ${item.color}`:""}</div>
+      </td>
+      <td style="padding:8px 12px;color:#9a7050;font-size:12px;text-align:center">×${item.quantity||1}</td>
+      <td style="padding:8px 12px;color:#c8a04a;font-size:13px;font-weight:700;text-align:right">₹${(Number(item.price||0)*(item.quantity||1)).toLocaleString("en-IN")}</td>
+    </tr>`
+  ).join("");
 
   await sendMail({
     to:      adminEmail,
-    subject: `🛍️ New Order #${String(orderId).slice(-6).toUpperCase()} — ₹${Number(totalAmount || 0).toLocaleString("en-IN")}`,
-    html: `
-      <div style="font-family:Arial,sans-serif;background:#0f0a04;
-                  max-width:520px;margin:0 auto;border-radius:12px;
-                  padding:28px;color:#e8d5a3">
+    subject: `🛍️ New Order #${shortId} — ₹${total} | ${email}`,
+    html: `<!DOCTYPE html><html>
+<body style="margin:0;padding:20px;background:#0f0a04;font-family:Arial,sans-serif">
+<div style="max-width:520px;margin:0 auto;background:#1a1008;border-radius:12px;overflow:hidden">
 
-        <h2 style="color:#c8a04a;font-family:Georgia,serif;margin:0 0 4px">
-          🛍️ New Order Received!
-        </h2>
-        <p style="color:#7a5a30;font-size:12px;margin:0 0 20px">
-          Order #${String(orderId).slice(-6).toUpperCase()} ·
-          ${new Date().toLocaleString("en-IN")}
-        </p>
+  <div style="background:linear-gradient(135deg,#c8a04a,#8b5e1a);padding:18px 24px;display:flex;align-items:center;gap:12px">
+    <span style="font-size:28px">🛍️</span>
+    <div>
+      <h2 style="color:#1a1008;font-family:Georgia,serif;font-size:17px;margin:0">New Order — #${shortId}</h2>
+      <p style="color:#5a3a0a;font-size:11px;margin:2px 0 0">${date}</p>
+    </div>
+  </div>
 
-        <table width="100%" cellpadding="0" cellspacing="0"
-          style="background:#1a1008;border:1px solid rgba(200,160,74,0.2);
-                 border-radius:8px;padding:16px;margin-bottom:16px">
-          <tr>
-            <td style="color:#7a5a30;font-size:11px;padding-bottom:4px">Customer</td>
-            <td style="color:#e8d5a3;font-weight:600">${email}</td>
-          </tr>
-          <tr>
-            <td style="color:#7a5a30;font-size:11px;padding-bottom:4px;padding-top:8px">Payment</td>
-            <td style="color:#e8d5a3">${paymentMethod || "COD"}</td>
-          </tr>
-          <tr>
-            <td style="color:#7a5a30;font-size:11px;padding-top:8px">Address</td>
-            <td style="color:#9a7050;font-size:12px">${addressLine || "Not provided"}</td>
-          </tr>
-        </table>
+  <div style="padding:20px">
 
-        <div style="background:#1a1008;border:1px solid rgba(200,160,74,0.2);
-                    border-radius:8px;padding:16px;margin-bottom:16px">
-          <h3 style="color:#c8a04a;font-size:12px;text-transform:uppercase;
-                     letter-spacing:1px;margin:0 0 10px">Items</h3>
-          <pre style="color:#9a7050;font-size:12px;
-                      font-family:monospace;white-space:pre-wrap;
-                      margin:0;line-height:1.8">${itemList}</pre>
-        </div>
+    <!-- TOTAL -->
+    <div style="background:#0f0a04;border:2px solid rgba(200,160,74,0.4);border-radius:10px;padding:18px;text-align:center;margin-bottom:16px">
+      <div style="color:#7a5a30;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Total Amount</div>
+      <div style="color:#c8a04a;font-size:34px;font-weight:700;font-family:Georgia,serif">₹${total}</div>
+      <div style="color:#9a7050;font-size:12px;margin-top:4px">${paymentMethod||"Online"} · ${email}</div>
+    </div>
 
-        <div style="background:rgba(200,160,74,0.1);border-radius:8px;
-                    padding:14px;text-align:center">
-          <div style="font-size:11px;color:#7a5a30;text-transform:uppercase;
-                      letter-spacing:1px;margin-bottom:4px">Total Amount</div>
-          <div style="font-size:28px;color:#c8a04a;font-weight:700;
-                      font-family:Georgia,serif">
-            ₹${Number(totalAmount || 0).toLocaleString("en-IN")}
-          </div>
-        </div>
+    <!-- ITEMS TABLE -->
+    <div style="color:#c8a04a;font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:8px">Items Ordered</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0a04;border:1px solid rgba(200,160,74,0.15);border-radius:8px;border-collapse:collapse;margin-bottom:16px">
+      <tbody>${itemsList}</tbody>
+      <tr style="background:rgba(200,160,74,0.1)">
+        <td colspan="3" style="padding:10px 12px;color:#9a7050;font-size:12px;font-weight:600;text-align:right">Total</td>
+        <td style="padding:10px 12px;color:#c8a04a;font-size:16px;font-weight:700;text-align:right">₹${total}</td>
+      </tr>
+    </table>
 
-        <p style="color:#5a3a10;font-size:11px;text-align:center;margin-top:16px">
-          Login to admin dashboard to update order status and add tracking.
-        </p>
-      </div>`,
+    <!-- ADDRESS -->
+    <div style="background:#0f0a04;border:1px solid rgba(200,160,74,0.15);border-radius:8px;padding:14px;margin-bottom:16px">
+      <div style="color:#c8a04a;font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:8px">📍 Ship To</div>
+      <div style="color:#9a7050;font-size:13px;line-height:1.8">${addrText}</div>
+    </div>
+
+    <div style="text-align:center;padding-top:14px;border-top:1px solid rgba(200,160,74,0.08)">
+      <p style="color:#5a3a10;font-size:11px;margin:0">Login to admin dashboard to ship this order.</p>
+    </div>
+  </div>
+</div>
+</body></html>`,
   });
 };
 
