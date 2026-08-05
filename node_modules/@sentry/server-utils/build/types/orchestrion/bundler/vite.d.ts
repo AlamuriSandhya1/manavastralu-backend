@@ -1,0 +1,31 @@
+type UnknownPlugin = any;
+/**
+ * Vite plugin that runs the orchestrion code transform on the bundled output.
+ *
+ * Use when bundling a Node app with Vite (e.g. Vite SSR builds, Nuxt's Nitro
+ * pipeline, SvelteKit). For unbundled Node processes use the runtime hook
+ * instead (`node --import @sentry/node/orchestrion app.js`).
+ *
+ * Returns two plugins:
+ *   1. `sentry-orchestrion-marker` — a `renderChunk` hook that prepends a
+ *      single-line banner to entry chunks. The banner sets
+ *      `globalThis.__SENTRY_ORCHESTRION__.bundler = true` at app boot, so the
+ *      `_experimentalSetupOrchestrion()` detector can confirm the bundler path
+ *      ran (rather than relying on a build-time flag that wouldn't be visible
+ *      to the runtime).
+ *      Also injects every instrumented package name into `ssr.noExternal` via
+ *      the `config` hook, since externalized deps are `require()`d at runtime
+ *      from `node_modules` and never pass through the transform.
+ *   2. The upstream `@apm-js-collab/code-transformer-bundler-plugins/vite`
+ *      plugin, fed our central `SENTRY_INSTRUMENTATIONS` config.
+ *
+ * @example
+ * ```ts
+ * // vite.config.ts
+ * import { sentryOrchestrionPlugin } from '@sentry/node/orchestrion/vite';
+ * export default { plugins: [sentryOrchestrionPlugin()] };
+ * ```
+ */
+export declare function sentryOrchestrionPlugin(): UnknownPlugin[];
+export {};
+//# sourceMappingURL=vite.d.ts.map

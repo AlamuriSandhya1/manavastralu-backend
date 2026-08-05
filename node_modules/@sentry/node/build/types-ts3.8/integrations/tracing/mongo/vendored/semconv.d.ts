@@ -1,0 +1,53 @@
+/**
+ * Deprecated, use `server.address`, `server.port` attributes instead.
+ *
+ * @deprecated Replaced by `server.address` and `server.port`.
+ */
+export declare const ATTR_DB_CONNECTION_STRING: "db.connection_string";
+/**
+ * Deprecated, use `db.collection.name` instead.
+ *
+ * @deprecated Replaced by `db.collection.name`.
+ */
+export declare const ATTR_DB_MONGODB_COLLECTION: "db.mongodb.collection";
+/**
+ * Deprecated, use `db.namespace` instead.
+ *
+ * @deprecated Replaced by `db.namespace`.
+ */
+export declare const ATTR_DB_NAME: "db.name";
+/**
+ * Deprecated, use `db.operation.name` instead.
+ *
+ * @deprecated Replaced by `db.operation.name`.
+ */
+export declare const ATTR_DB_OPERATION: "db.operation";
+/**
+ * The database statement being executed.
+ *
+ * @deprecated Replaced by `db.query.text`.
+ */
+export declare const ATTR_DB_STATEMENT: "db.statement";
+/**
+ * Deprecated, use `db.system.name` instead.
+ *
+ * @deprecated Replaced by `db.system.name`.
+ */
+export declare const ATTR_DB_SYSTEM: "db.system";
+/**
+ * Deprecated, use `server.address` on client spans and `client.address` on server spans.
+ *
+ * @deprecated Replaced by `server.address` on client spans and `client.address` on server spans.
+ */
+export declare const ATTR_NET_PEER_NAME: "net.peer.name";
+/**
+ * Deprecated, use `server.port` on client spans and `client.port` on server spans.
+ *
+ * @deprecated Replaced by `server.port` on client spans and `client.port` on server spans.
+ */
+export declare const ATTR_NET_PEER_PORT: "net.peer.port";
+/**
+ * Enum value "mongodb" for attribute {@link ATTR_DB_SYSTEM}.
+ */
+export declare const DB_SYSTEM_VALUE_MONGODB: "mongodb";
+//# sourceMappingURL=semconv.d.ts.map

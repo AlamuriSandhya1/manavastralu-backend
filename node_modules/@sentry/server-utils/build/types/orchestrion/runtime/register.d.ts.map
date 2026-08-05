@@ -1,0 +1,1 @@
+{"version":3,"file":"register.d.ts","sourceRoot":"","sources":["../../../../src/orchestrion/runtime/register.ts"],"names":[],"mappings":"AAOA,OAAO,CAAC,MAAM,CAAC;IAEb,IAAI,sBAAsB,EAAE;QAAE,OAAO,CAAC,EAAE,OAAO,CAAC;QAAC,OAAO,CAAC,EAAE,OAAO,CAAA;KAAE,GAAG,SAAS,CAAC;CAClF;AAED;;;;;;;;;;;;;;GAcG;AACH,wBAAgB,mCAAmC,IAAI,IAAI,CA4F1D"}

@@ -1,0 +1,1 @@
+{"version":3,"file":"detect.d.ts","sourceRoot":"","sources":["../../../src/orchestrion/detect.ts"],"names":[],"mappings":"AAGA,OAAO,CAAC,MAAM,CAAC;IAEb,IAAI,sBAAsB,EAAE;QAAE,OAAO,CAAC,EAAE,OAAO,CAAC;QAAC,OAAO,CAAC,EAAE,OAAO,CAAA;KAAE,GAAG,SAAS,CAAC;CAClF;AAED;;;;;;;;;;;;;;GAcG;AACH,wBAAgB,sBAAsB,IAAI,IAAI,CAiB7C"}

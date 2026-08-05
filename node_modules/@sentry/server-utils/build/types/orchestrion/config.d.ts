@@ -1,0 +1,35 @@
+import type { InstrumentationConfig } from '@apm-js-collab/code-transformer';
+/**
+ * The central list of channel injections orchestrion should perform.
+ *
+ * This module has NO side effects — it's the only thing both the runtime hook
+ * (`runtime/import-hook.mjs`) and the bundler plugins (`bundler/vite.ts`, …)
+ * import from. Adding a new instrumented method is one entry here plus one
+ * subscriber in `integrations/<lib>/tracing-channel.ts`.
+ *
+ * `channelName` here is the unprefixed suffix; the actual diagnostics_channel
+ * name is `orchestrion:${module.name}:${channelName}` (see `channels.ts`).
+ */
+export declare const SENTRY_INSTRUMENTATIONS: InstrumentationConfig[];
+/**
+ * The unique set of package names instrumented by `SENTRY_INSTRUMENTATIONS`
+ * (e.g. `['mysql']`).
+ *
+ * Bundler plugins MUST ensure these are actually bundled rather than
+ * externalized: an externalized dependency is resolved from `node_modules` at
+ * runtime and never passes through the code transform's `onLoad`, so its
+ * diagnostics_channel calls are silently never injected.
+ */
+export declare const INSTRUMENTED_MODULE_NAMES: string[];
+/**
+ * Returns `external` with any instrumented packages removed, so a bundler that
+ * uses an "external" denylist (esbuild, Bun, Rollup) still bundles — and thus
+ * transforms — them. Matches an exact package name (`'mysql'`) or a subpath
+ * (`'mysql/lib/...'`); wildcard/other patterns are left untouched. `undefined`
+ * is returned unchanged.
+ *
+ * (Vite uses an `ssr.noExternal` allowlist instead, so it consumes
+ * `INSTRUMENTED_MODULE_NAMES` directly rather than this helper.)
+ */
+export declare function withoutInstrumentedExternals(external: readonly string[] | undefined): string[] | undefined;
+//# sourceMappingURL=config.d.ts.map

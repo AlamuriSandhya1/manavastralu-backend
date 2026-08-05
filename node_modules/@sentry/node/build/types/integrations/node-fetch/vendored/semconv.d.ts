@@ -1,0 +1,13 @@
+export declare const ATTR_HTTP_REQUEST_METHOD: "http.request.method";
+export declare const ATTR_HTTP_REQUEST_METHOD_ORIGINAL: "http.request.method_original";
+export declare const ATTR_HTTP_RESPONSE_STATUS_CODE: "http.response.status_code";
+export declare const ATTR_NETWORK_PEER_ADDRESS: "network.peer.address";
+export declare const ATTR_NETWORK_PEER_PORT: "network.peer.port";
+export declare const ATTR_SERVER_ADDRESS: "server.address";
+export declare const ATTR_SERVER_PORT: "server.port";
+export declare const ATTR_URL_FULL: "url.full";
+export declare const ATTR_URL_PATH: "url.path";
+export declare const ATTR_URL_QUERY: "url.query";
+export declare const ATTR_URL_SCHEME: "url.scheme";
+export declare const ATTR_USER_AGENT_ORIGINAL: "user_agent.original";
+//# sourceMappingURL=semconv.d.ts.map
