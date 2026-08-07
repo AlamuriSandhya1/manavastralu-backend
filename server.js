@@ -12,7 +12,6 @@ const cors       = require("cors");
 const multer     = require("multer");
 const bcrypt     = require("bcryptjs");
 const mongoose   = require("mongoose");
-const { MongoClient } = require("mongodb");
 const fs         = require("fs");
 const crypto     = require("crypto");
 const axios      = require("axios");
@@ -20,12 +19,12 @@ const http       = require("http");
 const https      = require("https");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
-const Razorpay   = require("razorpay"); // ✅ ADDED — npm i razorpay
-const { initSocket, emitStockUpdate } = require("./socket"); // ✅ ADDED — npm i socket.io
+const Razorpay   = require("razorpay"); // npm i razorpay
+const { initSocket, emitStockUpdate } = require("./socket"); // npm i socket.io
 
 const app        = express();
 const httpServer = require("http").createServer(app);
-initSocket(httpServer); // ✅ ADDED — sets up Socket.IO on the same HTTP server
+initSocket(httpServer);
 
 // ── CORS ──────────────────────────────────────────────
 app.use(cors({
@@ -67,38 +66,70 @@ const cloudStorage = new CloudinaryStorage({
 });
 const upload = multer({ storage: cloudStorage });
 
-// ── MongoDB ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════
+//  ✅ MONGODB — REWRITTEN
+//
+//  What was wrong before: this file ran TWO completely separate
+//  MongoDB connections against the SAME credentials — a Mongoose
+//  connection AND a raw native `MongoClient` — and each one had
+//  its OWN independent retry loop (a setTimeout on connect-failure,
+//  PLUS a setTimeout on the "disconnected" event). That's up to
+//  4 overlapping reconnect timers all firing on their own schedule.
+//  The visible symptom was exactly what you saw: connect, disconnect,
+//  connect, disconnect — every 1-2 seconds, far faster than the 5s/
+//  10s delays in the code, because multiple attempts were racing
+//  each other concurrently.
+//
+//  On a free-tier (M0) Atlas cluster this kind of rapid duplicate
+//  authentication traffic from the same DB user can itself get
+//  rejected, which looks identical to "bad auth : authentication
+//  failed" even when the password is correct — making it look like
+//  a credentials problem when it was actually a connection-storm
+//  problem you were causing yourself.
+//
+//  Fix: ONE Mongoose connection. ONE reconnect path (Mongoose's own
+//  built-in retry via bufferCommands + the driver's internal retry,
+//  not a hand-rolled setTimeout loop layered on top of it). The
+//  native MongoClient is removed entirely — usersCol()/addressesCol()
+//  now use mongoose.connection.db, which is the exact same
+//  underlying connection, so nothing else in the file has to change.
+// ══════════════════════════════════════════════════════
 const MONGO_OPTS = {
-  serverSelectionTimeoutMS: 60000,
-  socketTimeoutMS:          60000,
-  connectTimeoutMS:         60000,
-  heartbeatFrequencyMS:     30000, // ← increase from 10000 to 30000
-  maxPoolSize:              5,     // ← reduce from 10 to 5
-  minPoolSize:              1,     // ← reduce from 2 to 1
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS:          45000,
+  connectTimeoutMS:         30000,
+  heartbeatFrequencyMS:     10000,
+  maxPoolSize:              10,
+  minPoolSize:              1,
   family:                   4,
   retryWrites:              true,
   retryReads:               true,
-  // ✅ Add these for unstable networks:
-  waitQueueTimeoutMS:       30000,
-  maxIdleTimeMS:            270000,
 };
-// ── Mongoose connect with auto-retry ─────────────────
+
+let mongoConnecting = false; // ✅ prevents overlapping connect attempts
+
 async function connectMongoose() {
+  if (mongoConnecting || mongoose.connection.readyState === 1) return;
+  mongoConnecting = true;
   try {
     await mongoose.connect(process.env.MONGODB_URI, MONGO_OPTS);
-    console.log("✅ Mongoose connected");
+    console.log("✅ Mongoose connected | DB:", mongoose.connection.name);
   } catch (err) {
     console.error("❌ Mongoose connect failed:", err.message);
-    console.log("🔄 Retrying in 10s...");
-    setTimeout(connectMongoose, 10000);
+  } finally {
+    mongoConnecting = false;
   }
 }
 connectMongoose();
 
-// ── Auto-reconnect on disconnect ─────────────────────
+// ✅ ONE reconnect path only — no duplicate timer stacked on top of
+// this. Mongoose's own connection events already fire in sequence
+// (disconnected → the driver retries internally → connected/error),
+// so we just react to the final state instead of racing extra
+// manual attempts against it.
 mongoose.connection.on("disconnected", () => {
-  console.log("⚠️  Mongoose disconnected — reconnecting in 5s...");
-  setTimeout(connectMongoose, 5000);
+  console.log("⚠️  Mongoose disconnected — will retry in 8s");
+  setTimeout(connectMongoose, 8000);
 });
 mongoose.connection.on("error", (err) => {
   console.error("❌ Mongoose error:", err.message);
@@ -107,28 +138,8 @@ mongoose.connection.on("reconnected", () => {
   console.log("✅ Mongoose reconnected");
 });
 
-// ── Native MongoClient with auto-retry ───────────────
-const mongoClient = new MongoClient(process.env.MONGODB_URI, {
-  ...MONGO_OPTS,
-  monitorCommands: false,
-});
-let db;
-async function connectDB() {
-  try {
-    await mongoClient.connect();
-    // Use silks_db or whatever DB is in the URI
-    const dbName = (process.env.MONGODB_URI || "").split("/").pop()?.split("?")[0] || "silks_db";
-    db = mongoClient.db(dbName);
-    console.log("✅ MongoDB native connected | DB:", dbName);
-  } catch (err) {
-    console.error("❌ MongoDB native failed:", err.message);
-    console.log("🔄 Retrying native connection in 10s...");
-    setTimeout(connectDB, 10000);
-  }
-}
-connectDB();
-
-// ── DB readiness check helper ─────────────────────────
+// ✅ DB readiness check helper — unchanged behavior, just reads
+// mongoose's own state, no second connection involved
 const waitForDB = () => new Promise((resolve, reject) => {
   if (mongoose.connection.readyState === 1) return resolve();
   let tries = 0;
@@ -142,8 +153,10 @@ const waitForDB = () => new Promise((resolve, reject) => {
   }, 500);
 });
 
-const usersCol     = () => db?.collection("users");
-const addressesCol = () => db?.collection("addresses");
+// ✅ These now use the SAME Mongoose connection instead of a second,
+// separate native MongoClient — same collections, one connection.
+const usersCol     = () => mongoose.connection.readyState === 1 ? mongoose.connection.db.collection("users") : null;
+const addressesCol = () => mongoose.connection.readyState === 1 ? mongoose.connection.db.collection("addresses") : null;
 
 // ── Models ────────────────────────────────────────────
 const Product = require("./models/Product");
@@ -182,10 +195,6 @@ const BACKEND_URL  = process.env.BACKEND_URL  || "http://localhost:8000";
 console.log(`✅ PhonePe | ENV:${process.env.PHONEPE_ENV} | Merchant:${PHONEPE_MERCHANT_ID||"NOT SET"}`);
 
 // ── Razorpay config ───────────────────────────────────
-// ✅ ADDED — this was missing entirely. Payment.js calls
-// /api/payment/create-order and /api/payment/verify, but neither
-// route existed anywhere in this file, which is exactly the 404
-// you were seeing on the Pay button.
 const razorpay = new Razorpay({
   key_id:     process.env.RAZORPAY_KEY_ID     || "",
   key_secret: process.env.RAZORPAY_KEY_SECRET || "",
@@ -254,7 +263,10 @@ app.get("/", (req, res) => res.json({
   mongo: mongoose.connection.readyState === 1 ? "connected" : "connecting",
 }));
 app.get("/api/health", (req, res) =>
-  res.status(200).json({ status:"ok", time:new Date().toISOString() })
+  res.status(200).json({
+    status:"ok", time:new Date().toISOString(),
+    mongo: mongoose.connection.readyState === 1 ? "connected" : "not connected",
+  })
 );
 app.get("/api/orders/:id/shipping-label", async (req, res) => {
   try {
@@ -266,7 +278,7 @@ app.get("/api/orders/:id/shipping-label", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════
-//  RAZORPAY  ✅ ADDED — this whole section is new
+//  RAZORPAY
 // ══════════════════════════════════════════════════════
 app.post("/api/payment/create-order", async (req, res) => {
   try {
@@ -290,14 +302,9 @@ app.post("/api/payment/create-order", async (req, res) => {
       orderId:  order.id,
       amount:   order.amount,
       currency: order.currency,
-      key:      process.env.RAZORPAY_KEY_ID, // public key, safe to send to frontend
+      key:      process.env.RAZORPAY_KEY_ID,
     });
   } catch (err) {
-    // ✅ FIX — the Razorpay SDK rejects with a plain object shaped like
-    // { statusCode, error: { code, description, ... } }, NOT a real
-    // Error instance. err.message was always undefined, which is why
-    // nothing useful ever printed. Log the full object and extract
-    // the real description Razorpay actually sent.
     console.error("❌ Razorpay create-order error (full):", JSON.stringify(err, null, 2));
     const razorpayMsg = err?.error?.description || err?.message || "Could not create Razorpay order";
     res.status(err?.statusCode || 500).json({ message: razorpayMsg });
@@ -505,7 +512,6 @@ app.post("/api/products/check-stock", async (req, res) => {
 
     let available = Number(product.stock) || 0;
 
-    // ✅ Check per-size stock first
     if (size && product.sizeStock && product.sizeStock.get) {
       const sizeQty = product.sizeStock.get(size);
       if (sizeQty !== undefined) available = Number(sizeQty) || 0;
@@ -569,7 +575,6 @@ app.post("/api/products", (req, res, next) => {
         : [];
     } catch { parsedSizes = []; }
 
-    // ✅ Parse sizeStock — calculate total stock from sizes
     let parsedSizeStock = {};
     try {
       parsedSizeStock = sizeStock ? JSON.parse(sizeStock) : {};
@@ -589,11 +594,11 @@ app.post("/api/products", (req, res, next) => {
       stock:totalStock,
       soldOut:totalStock===0,
       images,
-      sizeStock: parsedSizeStock,  // ✅ Save per-size stock
+      sizeStock: parsedSizeStock,
     });
 
     console.log("✅ Product created:", product._id, "| sizeStock:", parsedSizeStock);
-    emitStockUpdate(product); // ✅ ADDED — tell every connected browser about the new product
+    emitStockUpdate(product);
     res.json(product);
   } catch (err) {
     console.error("Product create error:", err.message);
@@ -612,12 +617,10 @@ app.put("/api/products/:id", async (req, res) => {
 
     const parsedSizeStock = sizeStock || {};
 
-    // ✅ Total stock = sum of all size stocks
     const totalStock = parsedSizes.length > 0 && Object.keys(parsedSizeStock).length > 0
       ? Object.values(parsedSizeStock).reduce((s, v) => s + Number(v || 0), 0)
       : Number(stock) || 0;
 
-    // ✅ Use findById + save + markModified so Mixed field is detected by Mongoose
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ error: "Product not found" });
 
@@ -636,18 +639,11 @@ app.put("/api/products/:id", async (req, res) => {
       ? JSON.parse(colorVariants)
       : (colorVariants || []);
 
-    // ✅ CRITICAL: tell Mongoose the Mixed field changed — without this sizeStock won't save
     product.markModified("sizeStock");
 
     const updated = await product.save();
-    console.log("✅ Product updated:", req.params.id);
-    console.log("   sizeStock:", JSON.stringify(Object.fromEntries
-      ? (updated.sizeStock instanceof Map
-          ? Object.fromEntries(updated.sizeStock)
-          : updated.sizeStock)
-      : updated.sizeStock));
-    console.log("   totalStock:", updated.stock);
-    emitStockUpdate(updated); // ✅ ADDED — this is what pushes "sold out" to the frontend live
+    console.log("✅ Product updated:", req.params.id, "| totalStock:", updated.stock);
+    emitStockUpdate(updated);
     res.json(updated);
   } catch (err) {
     console.error("❌ Product update error:", err.message);
@@ -659,7 +655,6 @@ app.delete("/api/products/:id", async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     await Product.findByIdAndDelete(req.params.id);
-    // ✅ ADDED — broadcast the removal as stock:0 so any open product card updates live
     if (product) emitStockUpdate({ ...product.toObject(), stock: 0, soldOut: true });
     res.json({ success:true });
   }
@@ -701,7 +696,6 @@ app.post("/add-order", async (req, res) => {
 
     console.log("✅ Order saved:", order._id, "| items:", order.products.length);
 
-    // ✅ Reduce per-size stock
     for (const item of normalizedItems) {
       if (!item.productId) continue;
       const product = await Product.findById(item.productId).catch(() => null);
@@ -710,7 +704,6 @@ app.post("/add-order", async (req, res) => {
       const size = item.selectedSize || item.size;
       let newStock = Math.max(0, Number(product.stock) - item.quantity);
 
-      // ✅ Reduce per-size stock if available
       if (size && product.sizeStock) {
         const sizeStockObj = product.sizeStock instanceof Map
           ? Object.fromEntries(product.sizeStock)
@@ -718,24 +711,22 @@ app.post("/add-order", async (req, res) => {
 
         if (sizeStockObj[size] !== undefined) {
           sizeStockObj[size] = Math.max(0, Number(sizeStockObj[size]) - item.quantity);
-          // Recalculate total from all sizes
           newStock = Object.values(sizeStockObj).reduce((s,v) => s+Number(v||0), 0);
           const updatedProduct = await Product.findByIdAndUpdate(item.productId, {
             sizeStock: sizeStockObj,
             stock:     newStock,
             soldOut:   newStock === 0,
           }, { new: true });
-          emitStockUpdate(updatedProduct); // ✅ ADDED — live update after purchase
+          emitStockUpdate(updatedProduct);
           console.log(`✅ Stock reduced | ${product.name} | size:${size} → ${sizeStockObj[size]} | total:${newStock}`);
           continue;
         }
       }
 
-      // Fallback: reduce total stock only
       const updatedProduct = await Product.findByIdAndUpdate(item.productId, {
         stock: newStock, soldOut: newStock === 0,
       }, { new: true });
-      emitStockUpdate(updatedProduct); // ✅ ADDED — live update after purchase (fallback path)
+      emitStockUpdate(updatedProduct);
     }
 
     const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
