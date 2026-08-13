@@ -67,32 +67,9 @@ const cloudStorage = new CloudinaryStorage({
 const upload = multer({ storage: cloudStorage });
 
 // ══════════════════════════════════════════════════════
-//  ✅ MONGODB — REWRITTEN
-//
-//  What was wrong before: this file ran TWO completely separate
-//  MongoDB connections against the SAME credentials — a Mongoose
-//  connection AND a raw native `MongoClient` — and each one had
-//  its OWN independent retry loop (a setTimeout on connect-failure,
-//  PLUS a setTimeout on the "disconnected" event). That's up to
-//  4 overlapping reconnect timers all firing on their own schedule.
-//  The visible symptom was exactly what you saw: connect, disconnect,
-//  connect, disconnect — every 1-2 seconds, far faster than the 5s/
-//  10s delays in the code, because multiple attempts were racing
-//  each other concurrently.
-//
-//  On a free-tier (M0) Atlas cluster this kind of rapid duplicate
-//  authentication traffic from the same DB user can itself get
-//  rejected, which looks identical to "bad auth : authentication
-//  failed" even when the password is correct — making it look like
-//  a credentials problem when it was actually a connection-storm
-//  problem you were causing yourself.
-//
-//  Fix: ONE Mongoose connection. ONE reconnect path (Mongoose's own
-//  built-in retry via bufferCommands + the driver's internal retry,
-//  not a hand-rolled setTimeout loop layered on top of it). The
-//  native MongoClient is removed entirely — usersCol()/addressesCol()
-//  now use mongoose.connection.db, which is the exact same
-//  underlying connection, so nothing else in the file has to change.
+//  MONGODB — single connection, single reconnect path
+//  (no duplicate native MongoClient, no overlapping retry
+//  loops — this is the version that fixed the auth-flapping)
 // ══════════════════════════════════════════════════════
 const MONGO_OPTS = {
   serverSelectionTimeoutMS: 30000,
@@ -106,7 +83,7 @@ const MONGO_OPTS = {
   retryReads:               true,
 };
 
-let mongoConnecting = false; // ✅ prevents overlapping connect attempts
+let mongoConnecting = false;
 
 async function connectMongoose() {
   if (mongoConnecting || mongoose.connection.readyState === 1) return;
@@ -122,11 +99,6 @@ async function connectMongoose() {
 }
 connectMongoose();
 
-// ✅ ONE reconnect path only — no duplicate timer stacked on top of
-// this. Mongoose's own connection events already fire in sequence
-// (disconnected → the driver retries internally → connected/error),
-// so we just react to the final state instead of racing extra
-// manual attempts against it.
 mongoose.connection.on("disconnected", () => {
   console.log("⚠️  Mongoose disconnected — will retry in 8s");
   setTimeout(connectMongoose, 8000);
@@ -138,8 +110,6 @@ mongoose.connection.on("reconnected", () => {
   console.log("✅ Mongoose reconnected");
 });
 
-// ✅ DB readiness check helper — unchanged behavior, just reads
-// mongoose's own state, no second connection involved
 const waitForDB = () => new Promise((resolve, reject) => {
   if (mongoose.connection.readyState === 1) return resolve();
   let tries = 0;
@@ -153,8 +123,6 @@ const waitForDB = () => new Promise((resolve, reject) => {
   }, 500);
 });
 
-// ✅ These now use the SAME Mongoose connection instead of a second,
-// separate native MongoClient — same collections, one connection.
 const usersCol     = () => mongoose.connection.readyState === 1 ? mongoose.connection.db.collection("users") : null;
 const addressesCol = () => mongoose.connection.readyState === 1 ? mongoose.connection.db.collection("addresses") : null;
 
@@ -526,11 +494,35 @@ app.post("/api/products/check-stock", async (req, res) => {
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
+// ✅ CHANGED — optional ?category= filter added. Calling this route
+// with no query param behaves EXACTLY as before (returns everything);
+// GET /api/products?category=Sarees returns only that category. The
+// match is case-insensitive so "sarees"/"Sarees"/"SAREES" all work.
 app.get("/api/products", async (req, res) => {
   try {
     await waitForDB();
-    res.json(await Product.find().sort({ createdAt:-1 }));
+    const { category } = req.query;
+    const filter = {};
+    if (category && category !== "All") {
+      filter.category = { $regex: `^${category}$`, $options: "i" };
+    }
+    res.json(await Product.find(filter).sort({ createdAt:-1 }));
   } catch (err) { res.status(500).json({ error:err.message }); }
+});
+
+// ✅ NEW — categories with live product counts, for the "Shop by
+// Category" circular grid. One call gives the frontend everything
+// it needs instead of fetching all products and counting client-side.
+app.get("/api/categories", async (req, res) => {
+  try {
+    await waitForDB();
+    const counts = await Product.aggregate([
+      { $match: { category: { $ne: null, $ne: "" } } },
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]);
+    res.json(counts.map(c => ({ category: c._id, count: c.count })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/products/:id", async (req, res) => {

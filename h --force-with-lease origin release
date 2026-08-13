@@ -1,0 +1,11 @@
+* [33m1997d815[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mrelease[m[33m)[m Add .gitignore
+* [33ma02230eb[m Backend updates
+[31m|[m * [33ma6562366[m[33m ([m[1;31morigin/release[m[33m)[m Backend updates
+[31m|[m * [33m5f7dc5e6[m Backend updates
+[31m|[m[31m/[m  
+* [33mca682604[m Backend updates
+* [33mc6492849[m Backend updates
+* [33m02157341[m Update backend configuration
+* [33m8554c9e0[m Update backend configuration
+* [33mb8923ff0[m fix: remove duplicate routes, fix tls, keep server alive
+* [33m2c813084[m remove duplicate routes
