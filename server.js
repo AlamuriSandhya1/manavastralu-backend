@@ -68,8 +68,6 @@ const upload = multer({ storage: cloudStorage });
 
 // ══════════════════════════════════════════════════════
 //  MONGODB — single connection, single reconnect path
-//  (no duplicate native MongoClient, no overlapping retry
-//  loops — this is the version that fixed the auth-flapping)
 // ══════════════════════════════════════════════════════
 const MONGO_OPTS = {
   serverSelectionTimeoutMS: 30000,
@@ -494,10 +492,6 @@ app.post("/api/products/check-stock", async (req, res) => {
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
-// ✅ CHANGED — optional ?category= filter added. Calling this route
-// with no query param behaves EXACTLY as before (returns everything);
-// GET /api/products?category=Sarees returns only that category. The
-// match is case-insensitive so "sarees"/"Sarees"/"SAREES" all work.
 app.get("/api/products", async (req, res) => {
   try {
     await waitForDB();
@@ -510,9 +504,6 @@ app.get("/api/products", async (req, res) => {
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
-// ✅ NEW — categories with live product counts, for the "Shop by
-// Category" circular grid. One call gives the frontend everything
-// it needs instead of fetching all products and counting client-side.
 app.get("/api/categories", async (req, res) => {
   try {
     await waitForDB();
