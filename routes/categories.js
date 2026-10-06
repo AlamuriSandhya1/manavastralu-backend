@@ -8,7 +8,7 @@
 const express = require("express");
 const Category = require("../models/Category");
 
-module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product }) {
+module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product, onChange }) {
   const router = express.Router();
 
   /* ───────── helpers ───────── */
@@ -101,7 +101,16 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
       await waitForDB();
       const cat = await findActive(req.params.slug);
       if (!cat) return res.status(404).json({ error: "Category not found" });
-      res.json(await Product.find({ categoryId: idMatch(cat._id) }).sort({ createdAt: -1 }));
+      res.set("Cache-Control", "public, max-age=15, stale-while-revalidate=60");
+      const list = await Product.find({ categoryId: idMatch(cat._id) })
+        .sort({ createdAt: -1 })
+        .select("-description")
+        .lean();
+      res.json(list.map((p) => {
+        const stock = Number(p.stock) || 0;
+        const availability = p.soldOut || stock <= 0 ? "sold_out" : stock <= 3 ? "low_stock" : "in_stock";
+        return { ...p, availability };
+      }));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -143,6 +152,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
         isActive: toBool(req.body.isActive, true),
         sortOrder,
       });
+      onChange && onChange();
       res.status(201).json({ ...doc.toObject(), productCount: 0 });
     } catch (err) {
       if (err.code === 11000) return res.status(409).json({ error: "A category with this name or slug already exists" });
@@ -182,6 +192,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
         await Product.updateMany({ categoryId: idMatch(cat._id) }, { $set: { category: cat.name } });
       }
 
+      onChange && onChange();
       const [withCount] = await withCounts([cat.toObject()]);
       res.json(withCount);
     } catch (err) {
@@ -205,6 +216,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
       }
 
       await cat.deleteOne();
+      onChange && onChange();
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: err.message });

@@ -20,7 +20,71 @@ const https      = require("https");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const Razorpay   = require("razorpay"); // npm i razorpay
-const { initSocket, emitStockUpdate } = require("./socket"); // npm i socket.io
+const compression = require("compression");  // npm i compression
+const { initSocket, emitStockUpdate: _emitStockUpdate } = require("./socket"); // npm i socket.io
+
+// ── Product list cache ────────────────────────────────
+// The product list is read by every visitor but changes rarely. It is kept in
+// memory (already serialised) and thrown away on ANY product / stock write,
+// because every write path below calls emitStockUpdate().
+const PRODUCT_CACHE_TTL = 20 * 1000;
+const productListCache  = new Map();           // key -> { at, body }
+
+// ── Storefront snapshot: ALL categories + ALL products in ONE response ──────
+// The /category pages need no further requests. It is built once, kept as a
+// ready-made JSON string, served from memory in a few milliseconds, rebuilt in
+// the background when it gets old, and rebuilt straight away after any change.
+const STOREFRONT_TTL   = 20 * 1000;
+let storefrontCache    = null;      // { at, body }
+let storefrontBuilding = null;      // in-flight build shared by everyone who asks meanwhile
+
+const clearProductCache = () => {
+  productListCache.clear();
+  storefrontCache = null;
+  setImmediate(() => { buildStorefront().catch(() => {}); });   // rebuild before the next visitor asks
+};
+const emitStockUpdate   = (p) => { clearProductCache(); return _emitStockUpdate(p); };
+
+// "in_stock" | "low_stock" | "sold_out" — sent with every product so the
+// storefront can show availability without recalculating it
+const availabilityOf = (p) => {
+  const stock = Number(p.stock) || 0;
+  if (p.soldOut || stock <= 0) return "sold_out";
+  if (stock <= 3)              return "low_stock";
+  return "in_stock";
+};
+
+function buildStorefront() {
+  if (storefrontBuilding) return storefrontBuilding;
+  storefrontBuilding = (async () => {
+    await waitForDB();
+    const [cats, prods] = await Promise.all([
+      Category.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean(),
+      Product.find({}).sort({ createdAt: -1 }).select("-description").lean(),
+    ]);
+
+    // product counts straight from the products already loaded (works whether
+    // categoryId was stored as an ObjectId or as text)
+    const counts = new Map();
+    prods.forEach((p) => {
+      if (p.categoryId) {
+        const k = String(p.categoryId);
+        counts.set(k, (counts.get(k) || 0) + 1);
+      }
+    });
+
+    const body = JSON.stringify({
+      categories: cats.map((c) => {
+        const n = counts.get(String(c._id)) || 0;
+        return { ...c, productCount: n, category: c.name, count: n };
+      }),
+      products: prods.map((p) => ({ ...p, availability: availabilityOf(p) })),
+    });
+    storefrontCache = { at: Date.now(), body };
+    return storefrontCache;
+  })().finally(() => { storefrontBuilding = null; });
+  return storefrontBuilding;
+}
 
 const app        = express();
 const httpServer = require("http").createServer(app);
@@ -43,6 +107,8 @@ app.use((req, res, next) => {
   }
   next();
 });
+// gzip every JSON response — product lists shrink ~5-10x, so they download far faster
+app.use(compression());
 app.use(express.json());
 
 // ── Upload folder ─────────────────────────────────────
@@ -127,6 +193,15 @@ const addressesCol = () => mongoose.connection.readyState === 1 ? mongoose.conne
 // ── Models ────────────────────────────────────────────
 const Product = require("./models/Product");
 const Order   = require("./models/Order");
+
+// Indexes make the product list / category lookups fast as the catalogue grows.
+// Safe to repeat — creating an index that already exists does nothing.
+mongoose.connection.on("connected", () => {
+  Product.collection.createIndex({ createdAt: -1 }).catch(() => {});
+  Product.collection.createIndex({ categoryId: 1 }).catch(() => {});
+  Product.collection.createIndex({ category: 1 }).catch(() => {});
+  buildStorefront().catch(() => {});      // first visitor already finds it ready
+});
 const User    = require("./models/User");
 const Category = require("./models/Category");                        // NEW
 const syncProductCategory = require("./middleware/syncProductCategory"); // NEW
@@ -496,25 +571,62 @@ app.post("/api/products/check-stock", async (req, res) => {
 
 app.get("/api/products", async (req, res) => {
   try {
+    const { category, view } = req.query;           // view=card → lighter list (no description)
+    const key = `${category || ""}|${view || ""}`;
+
+    // browsers / CDNs may reuse the answer for a few seconds, then refresh in the background
+    res.set("Cache-Control", "public, max-age=15, stale-while-revalidate=60");
+
+    const hit = productListCache.get(key);
+    if (hit && Date.now() - hit.at < PRODUCT_CACHE_TTL) {
+      return res.type("application/json").send(hit.body);   // no DB, no JSON.stringify
+    }
+
     await waitForDB();
-    const { category } = req.query;
     const filter = {};
     if (category && category !== "All") {
       filter.category = { $regex: `^${category}$`, $options: "i" };
     }
-    res.json(await Product.find(filter).sort({ createdAt:-1 }));
+    let q = Product.find(filter).sort({ createdAt:-1 }).lean();   // lean = plain objects, much faster
+    if (view === "card") q = q.select("-description");
+    const list = (await q).map(p => ({ ...p, availability: availabilityOf(p) }));
+
+    const body = JSON.stringify(list);
+    if (productListCache.size > 50) productListCache.clear();    // never let it grow unbounded
+    productListCache.set(key, { at: Date.now(), body });
+    res.type("application/json").send(body);
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
 // NEW: categories are now real database records (see routes/categories.js).
 // This replaces the old /api/categories that grouped products by name.
-app.use(require("./routes/categories")({ upload, adminPass: ADMIN_PASS, waitForDB, Product }));
+app.use(require("./routes/categories")({
+  upload, adminPass: ADMIN_PASS, waitForDB, Product,
+  onChange: clearProductCache,            // categories changed → refresh the storefront snapshot
+}));
+
+// ✅ ONE request for the whole storefront (categories + products).
+//    Served from memory; if it is a little old it is returned instantly and
+//    refreshed in the background, so visitors never wait on the database.
+app.get("/api/storefront", async (req, res) => {
+  try {
+    res.set("Cache-Control", "public, max-age=10, stale-while-revalidate=120");
+    let hit = storefrontCache;
+    if (hit) {
+      if (Date.now() - hit.at > STOREFRONT_TTL) buildStorefront().catch(() => {});
+      return res.type("application/json").send(hit.body);
+    }
+    hit = await buildStorefront();
+    res.type("application/json").send(hit.body);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get("/api/products/:id", async (req, res) => {
   try {
-    const p = await Product.findById(req.params.id);
+    const p = await Product.findById(req.params.id).lean();
     if (!p) return res.status(404).json({ error:"Not found" });
-    res.json(p);
+    res.set("Cache-Control", "no-cache");
+    res.json({ ...p, availability: availabilityOf(p) });
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
