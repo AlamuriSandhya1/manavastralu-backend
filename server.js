@@ -128,6 +128,8 @@ const addressesCol = () => mongoose.connection.readyState === 1 ? mongoose.conne
 const Product = require("./models/Product");
 const Order   = require("./models/Order");
 const User    = require("./models/User");
+const Category = require("./models/Category");                        // NEW
+const syncProductCategory = require("./middleware/syncProductCategory"); // NEW
 
 // ── Email service ─────────────────────────────────────
 let sendCustomerEmail = async () => {};
@@ -175,7 +177,7 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
 const STORE = {
   name:    "Reshma",
   address: "H No: 5-94/260, Srujanalaxmi Nagar,\nRoad No-7, Phase-2, Patelguda,\nPatancheru, Hyderabad,\nTelangana — 502319",
-  phone:   "7995869469",
+  phone:   "9390905464",
   insta:   "mana_vastralu",
 };
 
@@ -504,17 +506,9 @@ app.get("/api/products", async (req, res) => {
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
-app.get("/api/categories", async (req, res) => {
-  try {
-    await waitForDB();
-    const counts = await Product.aggregate([
-      { $match: { category: { $ne: null, $ne: "" } } },
-      { $group: { _id: "$category", count: { $sum: 1 } } },
-      { $sort: { _id: 1 } },
-    ]);
-    res.json(counts.map(c => ({ category: c._id, count: c.count })));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// NEW: categories are now real database records (see routes/categories.js).
+// This replaces the old /api/categories that grouped products by name.
+app.use(require("./routes/categories")({ upload, adminPass: ADMIN_PASS, waitForDB, Product }));
 
 app.get("/api/products/:id", async (req, res) => {
   try {
@@ -529,10 +523,10 @@ app.post("/api/products", (req, res, next) => {
     if (err) return res.status(500).json({ error:"Upload failed: " + err.message });
     next();
   });
-}, async (req, res) => {
+}, syncProductCategory, async (req, res) => {
   try {
     const { name, description, price, originalPrice, sizes, fabric, color,
-            stock, category, colorVariants, sizeStock } = req.body;
+            stock, category, categoryId, colorVariants, sizeStock } = req.body;
     if (!name || !price) return res.status(400).json({ error:"Name and price required" });
 
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
@@ -574,6 +568,7 @@ app.post("/api/products", (req, res, next) => {
       fabric:fabric||"",
       color:color||parsedVariants.map(v=>v.name).join(", ")||"ALL COLOURS",
       category:category||"",
+      categoryId: categoryId || undefined,
       stock:totalStock,
       soldOut:totalStock===0,
       images,
@@ -589,10 +584,10 @@ app.post("/api/products", (req, res, next) => {
   }
 });
 
-app.put("/api/products/:id", async (req, res) => {
+app.put("/api/products/:id", syncProductCategory, async (req, res) => {
   try {
     const { name, description, price, originalPrice, sizes, fabric, color,
-            stock, category, soldOut, colorVariants, sizeStock } = req.body;
+            stock, category, categoryId, soldOut, colorVariants, sizeStock } = req.body;
 
     const parsedSizes = typeof sizes === "string"
       ? sizes.split(",").map(s => s.trim()).filter(Boolean)
@@ -614,7 +609,10 @@ app.put("/api/products/:id", async (req, res) => {
     product.sizes         = parsedSizes;
     product.fabric        = fabric || "";
     product.color         = color  || "";
-    product.category      = category || "";
+    // categoryId is the source of truth; `category` is the name mirror set by syncProductCategory.
+    // If a request sends neither, the product's category is left unchanged.
+    if (categoryId) { product.categoryId = categoryId; product.category = category; }
+    else if (category !== undefined) product.category = category || "";
     product.stock         = totalStock;
     product.soldOut       = totalStock === 0;
     product.sizeStock     = parsedSizeStock;

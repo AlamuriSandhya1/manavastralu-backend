@@ -166,11 +166,11 @@ const sendCustomerEmail = async ({ email, orderId, products: items, totalAmount,
       <div style="color:#9a7050;font-size:13px;line-height:1.8">${addrText}</div>
     </div>
     <div style="background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.15);border-radius:8px;padding:12px;margin-bottom:18px">
-      <div style="color:#4ade80;font-size:12px;font-weight:700">🚚 Estimated Delivery: 3–7 Business Days</div>
-      <div style="color:#5a8060;font-size:11px;margin-top:3px">Ships via DTDC · Easy 7-day returns</div>
+      <div style="color:#4ade80;font-size:12px;font-weight:700">🚚 Estimated Delivery: 7–10 Business Days</div>
+      
     </div>
     <div style="text-align:center;padding-top:14px;border-top:1px solid rgba(200,160,74,0.08)">
-      // <p style="color:#9a7050;font-size:11px;margin:0 0 4px">Questions? WhatsApp: <strong style="color:#c8a04a">7995869469</strong></p>
+      // <p style="color:#9a7050;font-size:11px;margin:0 0 4px">Questions? WhatsApp: <strong style="color:#c8a04a">+91 9390905464</strong></p>
       <p style="color:#9a7050;font-size:11px;margin:0">manavastralu@gmail.com</p>
     </div>
   </div>

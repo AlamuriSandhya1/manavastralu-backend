@@ -1,9 +1,9 @@
 const STORE = {
   name:    "Reshma",
   address: "H No: 5-94/260, Srujanalaxmi Nagar,\nRoad No-7, Phase-2, Patelguda,\nPatancheru, Hyderabad,\nTelangana, Pin Code: 502319",
-  phone:   "7995869469",
+  phone:   "+91 9390905464",
   insta:   "mana_vastralu",
-  whatsapp:"7995869469",
+  whatsapp:"+91 9390905464",
   email:   "manavastralu@gmail.com",
   website: "manavastralu.com",
 };
