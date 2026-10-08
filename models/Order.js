@@ -40,6 +40,9 @@ const orderSchema = new mongoose.Schema({
   estimatedDelivery: { type: String, default: "" },
   shippedAt:         { type: Date },
 
+  // null = admin has not seen this order yet (drives the red badge on Orders)
+  adminViewedAt:     { type: Date, default: null },
+
 }, { timestamps: true });   // timestamps adds createdAt + updatedAt automatically
 
 module.exports = mongoose.model("Order", orderSchema);

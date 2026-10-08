@@ -86,6 +86,7 @@ function buildStorefront() {
   return storefrontBuilding;
 }
 
+const { notifyAdminWhatsApp } = require("./whatsappNotify");
 const app        = express();
 const httpServer = require("http").createServer(app);
 initSocket(httpServer);
@@ -202,6 +203,21 @@ mongoose.connection.on("connected", () => {
   Product.collection.createIndex({ category: 1 }).catch(() => {});
   buildStorefront().catch(() => {});      // first visitor already finds it ready
 });
+
+// ── Unread-order tracking (adminViewedAt) ─────────────────────────────────
+// One-time, safe to repeat: every order that has NO adminViewedAt field yet
+// (all historical orders) is marked as already viewed at its creation time,
+// so old orders never show up as "new". New orders carry adminViewedAt:null.
+mongoose.connection.on("connected", async () => {
+  try {
+    const r = await Order.collection.updateMany(
+      { adminViewedAt: { $exists: false } },
+      [{ $set: { adminViewedAt: { $ifNull: ["$createdAt", "$$NOW"] } } }]
+    );
+    if (r.modifiedCount) console.log(`✅ Migrated ${r.modifiedCount} old orders → adminViewedAt set`);
+    Order.collection.createIndex({ adminViewedAt: 1 }).catch(() => {});
+  } catch (e) { console.error("adminViewedAt migration:", e.message); }
+});
 const User    = require("./models/User");
 const Category = require("./models/Category");                        // NEW
 const syncProductCategory = require("./middleware/syncProductCategory"); // NEW
@@ -276,7 +292,7 @@ function generateShippingLabel(order) {
       <td style="padding:5px 8px;border-bottom:1px solid #f0e0c8;font-size:12px;text-align:right">₹${(Number(item.price||0)*(item.quantity||1)).toLocaleString("en-IN")}</td>
     </tr>`).join("");
   return `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Label #${shortId}</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:sans-serif;background:#f5e8d8;padding:20px;display:flex;flex-direction:column;align-items:center}.no-print{margin-bottom:14px}.no-print button{background:#3d1a0e;color:#e8d5a3;border:none;padding:11px 28px;font-size:14px;font-weight:700;cursor:pointer;border-radius:4px}.label{width:210mm;background:#fff9f4;border:2px solid #c9853a;border-radius:6px;overflow:hidden}.gold-strip{height:6px;background:linear-gradient(90deg,#c9853a,#e8b97a,#c9853a)}.label-body{display:grid;grid-template-columns:1fr 155px;min-height:130mm}.label-left{padding:16px 18px;border-right:1px dashed #c9853a;display:flex;flex-direction:column;gap:12px}.addr-tag{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#c9853a;margin-bottom:6px}.addr-name{font-size:16px;font-weight:700;color:#1a1008;margin-bottom:3px}.addr-text{font-size:12px;color:#5a3a22;line-height:1.65;white-space:pre-line}.addr-phone{font-size:13px;font-weight:600;color:#3d1a0e;margin-top:5px}.divider{border:none;border-top:1px dashed #c9853a;margin:4px 0}.label-right{padding:14px 12px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#fffaf5,#fdf0e0)}.brand-circle{width:126px;height:126px;border-radius:50%;border:3px solid #c9853a;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:12px}.brand-title{font-size:17px;font-weight:700;color:#3d1a0e;line-height:1.1;margin-bottom:4px}.thank-badge{font-size:11px;font-style:italic;color:#7a5030;text-align:center;padding:6px 8px;border:1px solid rgba(201,133,58,0.3);border-radius:3px;background:#fffaf5;width:100%}.order-meta{display:flex;gap:16px;padding:8px 18px;background:#fdf6ee;border-top:1px solid #f0e0c8;border-bottom:1px solid #f0e0c8;font-size:11px;color:#7a5030}.items-section{padding:8px 18px;border-bottom:1px solid #f0e0c8}.items-title{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#c9853a;margin-bottom:6px}table{width:100%;border-collapse:collapse}thead th{background:#fdf6ee;font-size:9px;font-weight:700;color:#9a7050;padding:5px 8px;text-align:left}.total-bar{background:#3d1a0e;color:#e8d5a3;padding:8px 14px;margin-top:8px;font-weight:700;font-size:13px;display:flex;justify-content:space-between}.label-footer{background:#fae8d8;padding:8px 18px;border-top:1px solid #e8d0b0;display:flex;justify-content:space-between;align-items:center}@media print{body{background:#fff;padding:0}.no-print{display:none!important}.label{box-shadow:none}@page{size:A5 landscape;margin:5mm}}</style></head><body>
+<style>*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}body{font-family:sans-serif;background:#f5e8d8;padding:20px;display:flex;flex-direction:column;align-items:center}.no-print{margin-bottom:14px}.no-print button{background:#3d1a0e;color:#e8d5a3;border:none;padding:11px 28px;font-size:14px;font-weight:700;cursor:pointer;border-radius:4px}.label{width:210mm;background:#fff9f4;border:2px solid #c9853a;border-radius:6px;overflow:hidden}.gold-strip{height:6px;background:linear-gradient(90deg,#c9853a,#e8b97a,#c9853a)}.label-body{display:grid;grid-template-columns:1fr 155px;min-height:130mm}.label-left{padding:16px 18px;border-right:1px dashed #c9853a;display:flex;flex-direction:column;gap:12px}.addr-tag{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#c9853a;margin-bottom:6px}.addr-name{font-size:16px;font-weight:700;color:#1a1008;margin-bottom:3px}.addr-text{font-size:12px;color:#5a3a22;line-height:1.65;white-space:pre-line}.addr-phone{font-size:13px;font-weight:600;color:#3d1a0e;margin-top:5px}.divider{border:none;border-top:1px dashed #c9853a;margin:4px 0}.label-right{padding:14px 12px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#fffaf5,#fdf0e0)}.brand-circle{width:126px;min-height:126px;border-radius:8px;border:3px solid #c9853a;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:12px}.brand-title{font-size:17px;font-weight:700;color:#3d1a0e;line-height:1.1;margin-bottom:4px}.thank-badge{font-size:11px;font-style:italic;color:#7a5030;text-align:center;padding:6px 8px;border:1px solid rgba(201,133,58,0.3);border-radius:3px;background:#fffaf5;width:100%}.order-meta{display:flex;gap:16px;padding:8px 18px;background:#fdf6ee;border-top:1px solid #f0e0c8;border-bottom:1px solid #f0e0c8;font-size:11px;color:#7a5030}.items-section{padding:8px 18px;border-bottom:1px solid #f0e0c8}.items-title{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#c9853a;margin-bottom:6px}table{width:100%;border-collapse:collapse}thead th{background:#fdf6ee;font-size:9px;font-weight:700;color:#9a7050;padding:5px 8px;text-align:left}.total-bar{background:#3d1a0e;color:#e8d5a3;padding:8px 14px;margin-top:8px;font-weight:700;font-size:13px;display:flex;justify-content:space-between}.label-footer{background:#fae8d8;padding:8px 18px;border-top:1px solid #e8d0b0;display:flex;justify-content:space-between;align-items:center}@media print{body{background:#fff;padding:0}.no-print{display:none!important}.label{box-shadow:none}@page{size:A5 landscape;margin:5mm}}</style></head><body>
 <div class="no-print"><button onclick="window.print()">🖨️ Print Shipping Label</button></div>
 <div class="label">
   <div class="gold-strip"></div>
@@ -787,6 +803,11 @@ app.post("/add-order", async (req, res) => {
       items:normalizedItems, products:normalizedItems, status:"Confirmed",
     });
 
+    // brand-new order = not yet seen by the admin (written natively so it works
+    // even if the schema does not declare the field)
+    await Order.collection.updateOne({ _id: order._id }, { $set: { adminViewedAt: null } });
+    notifyAdminWhatsApp(order);   // fire-and-forget
+
     console.log("✅ Order saved:", order._id, "| items:", order.products.length);
 
     for (const item of normalizedItems) {
@@ -864,11 +885,45 @@ app.get("/api/admin/products", async (req, res) => {
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
+// ── Unread orders badge ─────────────────────────────────────────────────────
+// NOTE: these must stay ABOVE `PUT /api/admin/orders/:id`, otherwise
+// "mark-viewed" would be read as an order id.
+const isAdminReq = (req) => (req.query.password || req.body?.password) === ADMIN_PASS;
+
+app.get("/api/admin/orders/unread-count", async (req, res) => {
+  if (!isAdminReq(req)) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    res.set("Cache-Control", "no-store");
+    const unreadCount = await Order.collection.countDocuments({
+      adminViewedAt: null,                 // null OR missing
+      status: { $ne: "Cancelled" },
+    });
+    res.json({ unreadCount });
+  } catch (err) { res.status(500).json({ message:"Failed to get unread order count" }); }
+});
+
+// body: { password, ids?: [orderId,...] }
+// With `ids` only those orders are marked (so an order that arrives while the
+// admin's list is loading is NOT marked by mistake). Without `ids`, all unseen.
+app.put("/api/admin/orders/mark-viewed", async (req, res) => {
+  if (!isAdminReq(req)) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    const filter = { adminViewedAt: null };
+    if (Array.isArray(req.body.ids)) {
+      filter._id = { $in: req.body.ids.filter(id => mongoose.isValidObjectId(id)).map(id => new mongoose.Types.ObjectId(id)) };
+    }
+    const r = await Order.collection.updateMany(filter, { $set: { adminViewedAt: new Date() } });
+    res.json({ success:true, marked: r.modifiedCount });
+  } catch (err) { res.status(500).json({ message:"Failed to mark orders as viewed" }); }
+});
+
 app.get("/api/admin/orders", async (req, res) => {
   if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
   try {
     await waitForDB();
-    res.json(await Order.find().sort({ createdAt:-1 }));
+    res.json(await Order.find().sort({ createdAt:-1 }).lean());   // lean keeps adminViewedAt
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
