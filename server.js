@@ -110,7 +110,8 @@ app.use((req, res, next) => {
 });
 // gzip every JSON response — product lists shrink ~5-10x, so they download far faster
 app.use(compression());
-app.use(express.json());
+// keep the raw body: Razorpay webhook signatures are computed over it
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // ── Upload folder ─────────────────────────────────────
 const UPLOAD_DIR = "uploads";
@@ -194,6 +195,7 @@ const addressesCol = () => mongoose.connection.readyState === 1 ? mongoose.conne
 // ── Models ────────────────────────────────────────────
 const Product = require("./models/Product");
 const Order   = require("./models/Order");
+const PendingCheckout = require("./models/PendingCheckout");
 
 // Indexes make the product list / category lookups fast as the catalogue grows.
 // Safe to repeat — creating an index that already exists does nothing.
@@ -216,6 +218,11 @@ mongoose.connection.on("connected", async () => {
     );
     if (r.modifiedCount) console.log(`✅ Migrated ${r.modifiedCount} old orders → adminViewedAt set`);
     Order.collection.createIndex({ adminViewedAt: 1 }).catch(() => {});
+    // one order per Razorpay payment, even if browser + webhook both try to save it
+    Order.collection.createIndex(
+      { paymentId: 1 },
+      { unique: true, partialFilterExpression: { paymentId: { $gt: "" } } }
+    ).catch((e) => console.warn("paymentId unique index not created (duplicates exist?):", e.message));
   } catch (e) { console.error("adminViewedAt migration:", e.message); }
 });
 const User    = require("./models/User");
@@ -341,7 +348,7 @@ app.get("/api/orders/:id/shipping-label", async (req, res) => {
 // ══════════════════════════════════════════════════════
 app.post("/api/payment/create-order", async (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, draft } = req.body;
     if (!amount || Number(amount) <= 0)
       return res.status(400).json({ message: "Valid amount is required" });
     if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
@@ -356,6 +363,19 @@ app.post("/api/payment/create-order", async (req, res) => {
     });
 
     console.log("✅ Razorpay order created:", order.id, "| amount:", amountInPaise);
+
+    // Save the cart/address NOW, before the customer pays. If the browser dies
+    // after payment, the webhook can still create the order from this copy.
+    if (draft && typeof draft === "object") {
+      try {
+        await waitForDB();
+        await PendingCheckout.findOneAndUpdate(
+          { razorpayOrderId: order.id },
+          { razorpayOrderId: order.id, draft, createdAt: new Date() },
+          { upsert: true }
+        );
+      } catch (e) { console.error("PendingCheckout save failed:", e.message); }
+    }
 
     res.json({
       orderId:  order.id,
@@ -773,43 +793,61 @@ app.delete("/api/products/:id", async (req, res) => {
 // ══════════════════════════════════════════════════════
 //  ORDERS
 // ══════════════════════════════════════════════════════
-app.post("/add-order", async (req, res) => {
+// ── Create an order (used by the browser AND by the Razorpay webhook) ────────
+// Safe to call twice for the same payment: the second call returns the first order.
+async function finalizeOrder(body, { silent = false } = {}) {
+  const { user_id, email, phone, address, payment_method, paymentMethod,
+          paymentId, paymentStatus, total_amount, totalAmount, products:items,
+          razorpay_order_id } = body;
+  if (!items || items.length === 0) { const e = new Error("No items in order"); e.status = 400; throw e; }
+
+  await waitForDB();
+  if (paymentId) {
+    const existing = await Order.findOne({ paymentId });
+    if (existing) return { order: existing, duplicate: true };
+  }
+
+  const normalizedItems = items.map(item => ({
+    productId:    item.productId||item._id||"",
+    name:         item.name||"",
+    price:        Number(item.price)||0,
+    quantity:     Number(item.quantity)||1,
+    size:         item.selectedSize||item.size||"",
+    selectedSize: item.selectedSize||item.size||"",
+    color:        item.color||"",
+    image:        item.image||item.images?.[0]||"",
+  }));
+
+  const finalPayMethod = payment_method || paymentMethod || "COD";
+  const finalTotal     = Number(total_amount || totalAmount || 0);
+
+  let order;
   try {
-    const { user_id, email, phone, address, payment_method, paymentMethod,
-            paymentId, paymentStatus, total_amount, totalAmount, products:items } = req.body;
-    if (!items || items.length === 0)
-      return res.status(400).json({ error:"No items in order" });
-
-    const normalizedItems = items.map(item => ({
-      productId:    item.productId||item._id||"",
-      name:         item.name||"",
-      price:        Number(item.price)||0,
-      quantity:     Number(item.quantity)||1,
-      size:         item.selectedSize||item.size||"",
-      selectedSize: item.selectedSize||item.size||"",
-      color:        item.color||"",
-      image:        item.image||item.images?.[0]||"",
-    }));
-
-    const finalPayMethod = payment_method || paymentMethod || "COD";
-    const finalTotal     = Number(total_amount || totalAmount || 0);
-
-    const order = await Order.create({
+    order = await Order.create({
       user_id:user_id||email, email:email||"guest@gmail.com",
       phone:phone||address?.phone||"", address:address||{},
       payment_method:finalPayMethod, paymentMethod:finalPayMethod,
+      razorpay_id: razorpay_order_id || null,
       paymentId:paymentId||"", paymentStatus:paymentStatus||"Pending",
       total_amount:finalTotal, totalAmount:finalTotal,
       items:normalizedItems, products:normalizedItems, status:"Confirmed",
     });
+  } catch (err) {
+    // browser + webhook raced: the other one won, return its order
+    if (err.code === 11000 && paymentId) {
+      const existing = await Order.findOne({ paymentId });
+      if (existing) return { order: existing, duplicate: true };
+    }
+    throw err;
+  }
 
-    // brand-new order = not yet seen by the admin (written natively so it works
-    // even if the schema does not declare the field)
-    await Order.collection.updateOne({ _id: order._id }, { $set: { adminViewedAt: null } });
-    notifyAdminWhatsApp(order);   // fire-and-forget
+  // brand-new order = not yet seen by the admin
+  await Order.collection.updateOne({ _id: order._id }, { $set: { adminViewedAt: null } });
+  console.log("✅ Order saved:", order._id, "| items:", order.products.length);
+  if (!silent) notifyAdminWhatsApp(order);   // fire-and-forget
 
-    console.log("✅ Order saved:", order._id, "| items:", order.products.length);
-
+  // stock reduction must never undo a saved order
+  try {
     for (const item of normalizedItems) {
       if (!item.productId) continue;
       const product = await Product.findById(item.productId).catch(() => null);
@@ -827,9 +865,7 @@ app.post("/add-order", async (req, res) => {
           sizeStockObj[size] = Math.max(0, Number(sizeStockObj[size]) - item.quantity);
           newStock = Object.values(sizeStockObj).reduce((s,v) => s+Number(v||0), 0);
           const updatedProduct = await Product.findByIdAndUpdate(item.productId, {
-            sizeStock: sizeStockObj,
-            stock:     newStock,
-            soldOut:   newStock === 0,
+            sizeStock: sizeStockObj, stock: newStock, soldOut: newStock === 0,
           }, { new: true });
           emitStockUpdate(updatedProduct);
           console.log(`✅ Stock reduced | ${product.name} | size:${size} → ${sizeStockObj[size]} | total:${newStock}`);
@@ -842,29 +878,174 @@ app.post("/add-order", async (req, res) => {
       }, { new: true });
       emitStockUpdate(updatedProduct);
     }
+  } catch (e) { console.error("Stock update failed (order is saved):", e.message); }
 
-    const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
+  const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
+  if (!silent) {
     Promise.all([
       sendCustomerEmail({ email, orderId:order._id, products:normalizedItems, totalAmount:finalTotal, address, paymentMethod:finalPayMethod }).catch(e=>console.error("Customer email:",e.message)),
       sendAdminEmail({    email, orderId:order._id, products:normalizedItems, totalAmount:finalTotal, address, paymentMethod:finalPayMethod, labelUrl }).catch(e=>console.error("Admin email:",e.message)),
     ]);
+  }
+  return { order, labelUrl };
+}
 
-    res.status(201).json({ success:true, orderId:order._id, labelUrl });
+app.post("/add-order", async (req, res) => {
+  try {
+    const body = { ...req.body };
+    // if the browser sends Razorpay's signature, check it (never loses the order if it fails)
+    if (body.paymentId && body.razorpay_order_id && body.razorpay_signature && process.env.RAZORPAY_KEY_SECRET) {
+      const expected = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(`${body.razorpay_order_id}|${body.paymentId}`).digest("hex");
+      body.paymentStatus = expected === body.razorpay_signature ? "Paid" : "Check payment";
+    }
+    const { order, labelUrl } = await finalizeOrder(body);
+    // the order is saved, so the cart draft is no longer needed
+    if (body.razorpay_order_id) PendingCheckout.deleteOne({ razorpayOrderId: body.razorpay_order_id }).catch(()=>{});
+    res.status(201).json({ success:true, orderId:order._id, labelUrl: labelUrl || `${BACKEND_URL}/api/orders/${order._id}/shipping-label` });
   } catch (err) {
     console.error("Order error:", err);
-    res.status(500).json({ error:err.message });
+    res.status(err.status || 500).json({ error:err.message });
   }
 });
 
-app.get("/my-orders/:email", async (req, res) => {
-  try { res.json(await Order.find({ email:req.params.email }).sort({ createdAt:-1 })); }
-  catch (err) { res.status(500).json({ error:err.message }); }
+// ── Turn a captured Razorpay payment into an order if none exists ────────────
+async function recoverPayment(pay, { placeholder = false } = {}) {
+  await waitForDB();
+  if (await Order.findOne({ paymentId: pay.id })) return { status: "exists" };
+
+  const pending = await PendingCheckout.findOne({ razorpayOrderId: pay.order_id });
+  if (pending) {
+    const r = await finalizeOrder({
+      ...pending.draft, paymentId: pay.id, razorpay_order_id: pay.order_id, paymentStatus: "Paid",
+    });
+    await PendingCheckout.deleteOne({ _id: pending._id }).catch(()=>{});
+    return { status: "created-from-cart", orderId: r.order._id };
+  }
+  if (!placeholder) return { status: "no-cart-saved" };
+
+  // Old payment, cart unknown: create a visible placeholder so it shows in the admin
+  // dashboard (customer phone/email come from Razorpay) and can be followed up.
+  const amount = Number(pay.amount || 0) / 100;
+  const r = await finalizeOrder({
+    email: pay.email || "guest@gmail.com",
+    phone: pay.contact || "",
+    address: { fullName: "(address unknown — call customer)", phone: String(pay.contact || "").replace(/^\+?91/, "") },
+    paymentMethod: `Razorpay ${pay.method || ""}`.trim(),
+    paymentId: pay.id, razorpay_order_id: pay.order_id, paymentStatus: "Paid",
+    total_amount: amount,
+    products: [{ name: `⚠️ RECOVERED PAYMENT ₹${amount} — items unknown, check Razorpay ${pay.id}`, price: amount, quantity: 1 }],
+  }, { silent: true });
+  return { status: "placeholder-created", orderId: r.order._id };
+}
+
+// Razorpay calls this by itself when a payment succeeds — even if the customer's
+// browser/phone closed. Set it up once in the Razorpay dashboard (see notes).
+app.post("/api/payment/razorpay/webhook", async (req, res) => {
+  try {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) return res.status(500).json({ error: "RAZORPAY_WEBHOOK_SECRET not set" });
+    const expected = crypto.createHmac("sha256", secret).update(req.rawBody || "").digest("hex");
+    if (req.headers["x-razorpay-signature"] !== expected) return res.status(400).json({ error: "Bad signature" });
+    res.json({ received: true });                       // answer fast, work after
+
+    const ev  = req.body.event;
+    const pay = req.body.payload?.payment?.entity;
+    if (!["payment.captured", "order.paid"].includes(ev) || !pay) return;
+    const r = await recoverPayment(pay);
+    console.log(`🔔 Razorpay webhook ${ev} | ${pay.id} | ${r.status}`);
+  } catch (e) { console.error("Razorpay webhook error:", e.message); }
 });
 
-app.get("/api/orders/:email", async (req, res) => {
-  try { res.json(await Order.find({ email:req.params.email }).sort({ createdAt:-1 })); }
-  catch (err) { res.status(500).json({ error:err.message }); }
+// Read-only health check of the orders collection (no customer details returned).
+//   GET /api/admin/orders/diagnose?password=...
+app.get("/api/admin/orders/diagnose", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    const col = Order.collection;
+    const [total, byStatus, byPay, noCreatedAt, noEmail, dupPay, latest] = await Promise.all([
+      col.countDocuments({}),
+      col.aggregate([{ $group:{ _id:"$status", n:{ $sum:1 } } }]).toArray(),
+      col.aggregate([{ $group:{ _id:"$paymentStatus", n:{ $sum:1 } } }]).toArray(),
+      col.countDocuments({ createdAt: { $exists:false } }),
+      col.countDocuments({ $or:[{ email:{ $exists:false } },{ email:"" }] }),
+      col.aggregate([{ $match:{ paymentId:{ $gt:"" } } },{ $group:{ _id:"$paymentId", n:{ $sum:1 } } },{ $match:{ n:{ $gt:1 } } }]).toArray(),
+      col.find({}, { projection:{ createdAt:1, status:1, paymentStatus:1, paymentId:1, email:1 } }).sort({ _id:-1 }).limit(15).toArray(),
+    ]);
+    res.json({
+      totalOrdersInDatabase: total,            // compare with the dashboard's "Total Orders"
+      byStatus: byStatus, byPaymentStatus: byPay,
+      ordersWithoutCreatedAt: noCreatedAt, ordersWithoutEmail: noEmail,
+      duplicatePaymentIds: dupPay.map(d => ({ paymentId: d._id, count: d.n })),
+      guestOrders: await col.countDocuments({ email: /^guest@gmail\.com$/i }),
+      latest15: latest.map(o => ({ idSuffix: String(o._id).slice(-6), createdAt: o.createdAt, status: o.status, paymentStatus: o.paymentStatus, hasPaymentId: !!o.paymentId })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// Admin tool: finds payments that were taken but have NO order.
+//   GET /api/admin/razorpay/reconcile?password=...&days=30           → just list them
+//   GET /api/admin/razorpay/reconcile?password=...&days=30&recover=1 → also create the orders
+app.get("/api/admin/razorpay/reconcile", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    const days = Math.min(Number(req.query.days) || 30, 180);
+    const to = Math.floor(Date.now() / 1000), from = to - days * 86400;
+    const missing = [];
+    let checked = 0;
+    for (let skip = 0; ; skip += 100) {
+      const page  = await razorpay.payments.all({ from, to, count: 100, skip });
+      const items = page.items || [];
+      for (const p of items) {
+        checked++;
+        if (p.status !== "captured" || Number(p.amount_refunded) > 0) continue;
+        if (!(await Order.findOne({ paymentId: p.id }))) missing.push(p);
+      }
+      if (items.length < 100) break;
+    }
+    const out = [];
+    for (const p of missing) {
+      const row = {
+        paymentId: p.id, razorpayOrderId: p.order_id, amountRs: Number(p.amount) / 100,
+        email: p.email, phone: p.contact, method: p.method,
+        paidAt: new Date(p.created_at * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
+      };
+      if (req.query.recover === "1") row.result = await recoverPayment(p, { placeholder: true });
+      out.push(row);
+    }
+    res.json({ days, paymentsChecked: checked, paidButNoOrder: out.length, recovered: req.query.recover === "1", payments: out });
+  } catch (err) { res.status(500).json({ error: err.error?.description || err.message }); }
+});
+
+// A customer's orders: their email (any capitalisation) PLUS
+//   • orders whose IDs this device remembers (strong match), and
+//   • orders that were saved as "guest" with the customer's own phone number.
+// That way an order is never "lost" just because the email was missing when it was placed.
+const escapeRe = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const myOrders = async (req, res) => {
+  try {
+    await waitForDB();
+    const or = [];
+    const email = String(req.params.email || "").trim();
+    if (email && !/^guest@gmail\.com$/i.test(email)) or.push({ email: { $regex: `^${escapeRe(email)}$`, $options: "i" } });
+
+    const ids = String(req.query.ids || "").split(",").map(x => x.trim()).filter(x => mongoose.isValidObjectId(x)).slice(0, 100);
+    if (ids.length) or.push({ _id: { $in: ids.map(x => new mongoose.Types.ObjectId(x)) } });
+
+    const phones = [...new Set(String(req.query.phones || "").split(",")
+      .map(x => x.replace(/\D/g, "").slice(-10)).filter(x => x.length === 10))].slice(0, 5);
+    if (phones.length) {
+      const variants = phones.flatMap(d => [d, `91${d}`, `+91${d}`, `${d.slice(0,5)} ${d.slice(5)}`]);
+      or.push({ email: /^guest@gmail\.com$/i, $or: [{ "address.phone": { $in: variants } }, { phone: { $in: variants } }] });
+    }
+    if (!or.length) return res.json([]);
+    res.json(await Order.find({ $or: or }).sort({ createdAt: -1 }).lean());
+  } catch (err) { res.status(500).json({ error: err.message }); }
+};
+app.get("/my-orders/:email", myOrders);
+app.get("/api/orders/:email", myOrders);
 
 // ══════════════════════════════════════════════════════
 //  ADMIN
