@@ -218,11 +218,23 @@ mongoose.connection.on("connected", async () => {
     );
     if (r.modifiedCount) console.log(`✅ Migrated ${r.modifiedCount} old orders → adminViewedAt set`);
     Order.collection.createIndex({ adminViewedAt: 1 }).catch(() => {});
+    Order.collection.createIndex({ razorpay_id: 1 }).catch(() => {});
     // one order per Razorpay payment, even if browser + webhook both try to save it
     Order.collection.createIndex(
       { paymentId: 1 },
       { unique: true, partialFilterExpression: { paymentId: { $gt: "" } } }
     ).catch((e) => console.warn("paymentId unique index not created (duplicates exist?):", e.message));
+    // Orders saved before this fix already had their stock reduced by the old
+    // code → mark them, so nothing can ever reduce their stock a second time.
+    const s = await Order.collection.updateMany(
+      { stockDeductedAt: { $exists: false } },
+      [{ $set: { stockDeductedAt: { $ifNull: ["$createdAt", "$$NOW"] } } }]
+    );
+    if (s.modifiedCount) console.log(`✅ Marked ${s.modifiedCount} old orders as stock-already-deducted`);
+    // saved carts must never be auto-deleted; warn until the old TTL index is removed
+    const pIdx = await PendingCheckout.collection.indexes().catch(() => []);
+    if (pIdx.some(i => i.expireAfterSeconds !== undefined))
+      console.warn("⚠️ pendingcheckouts still has an auto-delete (TTL) index — run: node scripts/pending-checkout-ttl.js --apply");
   } catch (e) { console.error("adminViewedAt migration:", e.message); }
 });
 const User    = require("./models/User");
@@ -235,8 +247,10 @@ let sendAdminEmail    = async () => {};
 let sendOTPEmail      = async (email, otp) => {
   console.log(`🔐 OTP for ${email}: ${otp}`);
 };
+let emailSvc = {};
 try {
   const svc     = require("./emailService");
+  emailSvc          = svc;
   sendCustomerEmail = svc.sendCustomerEmail || sendCustomerEmail;
   sendAdminEmail    = svc.sendAdminEmail    || sendAdminEmail;
   sendOTPEmail      = svc.sendOTPEmail      || sendOTPEmail;
@@ -248,17 +262,8 @@ const otpStore      = {};
 const ADMIN_PASS    = process.env.ADMIN_PASS || "admin123";
 const getAdminEmail = () => process.env.ADMIN_EMAIL || process.env.GMAIL_USER;
 
-// ── PhonePe config ────────────────────────────────────
-const PHONEPE_MERCHANT_ID = process.env.PHONEPE_MERCHANT_ID || "";
-const PHONEPE_SALT_KEY    = process.env.PHONEPE_SALT_KEY    || "";
-const PHONEPE_SALT_INDEX  = process.env.PHONEPE_SALT_INDEX  || "1";
-const PHONEPE_HOST        = process.env.PHONEPE_ENV === "production"
-  ? "https://api.phonepe.com/apis/hermes"
-  : "https://api-preprod.phonepe.com/apis/pg-sandbox";
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const BACKEND_URL  = process.env.BACKEND_URL  || "http://localhost:8000";
 
-console.log(`✅ PhonePe | ENV:${process.env.PHONEPE_ENV} | Merchant:${PHONEPE_MERCHANT_ID||"NOT SET"}`);
 
 // ── Razorpay config ───────────────────────────────────
 const razorpay = new Razorpay({
@@ -270,6 +275,36 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
 } else {
   console.log(`✅ Razorpay configured | key:${process.env.RAZORPAY_KEY_ID}`);
 }
+if (!process.env.RAZORPAY_WEBHOOK_SECRET) console.log("⚠️ RAZORPAY_WEBHOOK_SECRET NOT SET — paid orders are not protected if the browser closes");
+
+// ── Paid-order pipeline (browser, webhook, reconciler, recovery script) ────
+const PaymentAlert       = require("./models/PaymentAlert");
+const PaymentEvent       = require("./models/PaymentEvent");
+const mongoStore         = require("./services/mongoStore");
+const createPaymentOrders = require("./services/paymentOrders");
+const { withRetry }      = createPaymentOrders;
+const makeAlertEmail     = require("./services/alertEmail");
+
+const notifyNewOrder = (order) => {
+  const products = order.products || [];
+  const total    = order.totalAmount || order.total_amount;
+  const payMethod = order.paymentMethod || order.payment_method;
+  const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
+  try { notifyAdminWhatsApp(order); } catch (e) { console.error("WhatsApp notify:", e.message); }
+  const realEmail = order.email && !/^guest@gmail\.com$/i.test(order.email) ? order.email : "";
+  Promise.all([
+    realEmail && sendCustomerEmail({ email: realEmail, orderId: order._id, products, totalAmount: total, address: order.address, paymentMethod: payMethod }).catch(e => console.error("Customer email:", e.message)),
+    sendAdminEmail({ email: order.email, orderId: order._id, products, totalAmount: total, address: order.address, paymentMethod: payMethod, labelUrl }).catch(e => console.error("Admin email:", e.message)),
+  ]);
+};
+
+const orderStore = mongoStore({ Order, Product, PendingCheckout, PaymentAlert, PaymentEvent, waitForDB });
+const payments = createPaymentOrders({
+  store: orderStore, razorpay,
+  emitStockUpdate,
+  onNewOrder: notifyNewOrder,
+  sendAlertEmail: makeAlertEmail(emailSvc),
+});
 
 // ── Shipping label ────────────────────────────────────
 const STORE = {
@@ -332,6 +367,8 @@ app.get("/api/health", (req, res) =>
   res.status(200).json({
     status:"ok", time:new Date().toISOString(),
     mongo: mongoose.connection.readyState === 1 ? "connected" : "not connected",
+    razorpayMode: String(process.env.RAZORPAY_KEY_ID || "").startsWith("rzp_live_") ? "live" : (process.env.RAZORPAY_KEY_ID ? "test" : "not set"),
+    webhookSecretSet: !!process.env.RAZORPAY_WEBHOOK_SECRET,
   })
 );
 app.get("/api/orders/:id/shipping-label", async (req, res) => {
@@ -355,26 +392,38 @@ app.post("/api/payment/create-order", async (req, res) => {
       return res.status(500).json({ message: "Razorpay keys not configured in .env" });
 
     const amountInPaise = Math.round(Number(amount) * 100);
+    const d = draft && typeof draft === "object" ? draft : null;
+    const a = d?.address || {};
 
-    const order = await razorpay.orders.create({
+    const order = await withRetry(() => razorpay.orders.create({
       amount:   amountInPaise,
       currency: "INR",
       receipt:  `rcpt_${Date.now()}`,
-    });
+      // small backup copy inside Razorpay itself (shown in reconcile reports)
+      notes: d ? {
+        email:   String(d.email || "").slice(0, 200),
+        phone:   String(a.phone || d.phone || "").slice(0, 20),
+        name:    String(a.fullName || a.name || "").slice(0, 100),
+        pincode: String(a.pincode || "").slice(0, 10),
+        items:   (d.products || d.items || d.cart || []).map(i => `${i.name || ""} ${i.selectedSize || i.size || ""} x${i.quantity || 1}`).join(" | ").slice(0, 250),
+      } : {},
+    }), { label: "razorpay order" });
 
     console.log("✅ Razorpay order created:", order.id, "| amount:", amountInPaise);
 
     // Save the cart/address NOW, before the customer pays. If the browser dies
-    // after payment, the webhook can still create the order from this copy.
-    if (draft && typeof draft === "object") {
+    // after payment, the webhook / reconciler create the order from this copy.
+    // If it cannot be saved we refuse to start the payment (the customer has not
+    // paid anything yet, so it is safe to ask them to try again).
+    if (d) {
       try {
-        await waitForDB();
-        await PendingCheckout.findOneAndUpdate(
-          { razorpayOrderId: order.id },
-          { razorpayOrderId: order.id, draft, createdAt: new Date() },
-          { upsert: true }
-        );
-      } catch (e) { console.error("PendingCheckout save failed:", e.message); }
+        await withRetry(() => orderStore.savePending(order.id, d, { amountPaise: amountInPaise }), { label: "save cart" });
+      } catch (e) {
+        console.error("❌ PendingCheckout save failed — payment NOT started:", e.message);
+        return res.status(503).json({ message: "Could not start payment, please try again in a moment." });
+      }
+    } else {
+      console.warn("⚠️ create-order called without `draft` — update Checkout to send the cart (see frontend/src/utils/razorpayCheckout.js)");
     }
 
     res.json({
@@ -413,111 +462,6 @@ app.post("/api/payment/verify", async (req, res) => {
   } catch (err) {
     console.error("❌ Razorpay verify error (full):", JSON.stringify(err, null, 2));
     res.status(500).json({ success:false, message: err?.error?.description || err?.message || "Verification failed" });
-  }
-});
-
-// ══════════════════════════════════════════════════════
-//  PHONEPE
-// ══════════════════════════════════════════════════════
-app.post("/api/payment/phonepe/initiate", async (req, res) => {
-  try {
-    const { amount, orderId, userEmail, phone } = req.body;
-    if (!amount || !orderId)
-      return res.status(400).json({ error:"amount and orderId are required" });
-    if (!PHONEPE_MERCHANT_ID || !PHONEPE_SALT_KEY)
-      return res.status(500).json({ error:"PhonePe keys not configured in .env" });
-
-    const merchantTransactionId =
-      `MV${String(orderId).slice(-8).toUpperCase()}${Date.now().toString().slice(-5)}`;
-    const amountInPaise = Math.round(Number(amount) * 100);
-
-    const payload = {
-      merchantId:            PHONEPE_MERCHANT_ID,
-      merchantTransactionId: merchantTransactionId,
-      merchantUserId:        `MU${(userEmail||"guest").replace(/[^a-zA-Z0-9]/g,"").slice(0,10)}`,
-      amount:                amountInPaise,
-      redirectUrl:           `${FRONTEND_URL}/order-success?orderId=${orderId}`,
-      redirectMode:          "REDIRECT",
-      callbackUrl:           `${BACKEND_URL}/api/payment/phonepe/callback`,
-      mobileNumber:          (phone||"9999999999").replace(/\D/g,"").slice(-10),
-      paymentInstrument:     { type:"PAY_PAGE" },
-    };
-
-    const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString("base64");
-    const checksum = crypto.createHash("sha256")
-      .update(payloadBase64 + "/pg/v1/pay" + PHONEPE_SALT_KEY)
-      .digest("hex") + "###" + PHONEPE_SALT_INDEX;
-
-    console.log("📱 PhonePe initiate | order:", orderId, "| paise:", amountInPaise);
-
-    const response = await axios.post(
-      `${PHONEPE_HOST}/pg/v1/pay`,
-      { request: payloadBase64 },
-      { headers: {
-          "Content-Type":  "application/json",
-          "X-VERIFY":      checksum,
-          "X-MERCHANT-ID": PHONEPE_MERCHANT_ID,
-        }
-      }
-    );
-
-    const paymentUrl = response.data?.data?.instrumentResponse?.redirectInfo?.url;
-    if (paymentUrl) {
-      await Order.findByIdAndUpdate(orderId, {
-        phonePeTransactionId: merchantTransactionId, paymentStatus:"Initiated",
-      }).catch(() => {});
-      console.log("✅ PhonePe URL:", paymentUrl);
-      return res.json({ success:true, paymentUrl, merchantTransactionId });
-    } else {
-      return res.status(400).json({ error:"PhonePe did not return a payment URL", detail:response.data });
-    }
-  } catch (err) {
-    console.error("❌ PhonePe error:", err.response?.data || err.message);
-    return res.status(500).json({ error: err.response?.data?.message || err.message });
-  }
-});
-
-app.post("/api/payment/phonepe/callback", async (req, res) => {
-  try {
-    const { response: responseBase64 } = req.body;
-    if (!responseBase64) return res.json({ success:true });
-    const decoded = JSON.parse(Buffer.from(responseBase64,"base64").toString("utf8"));
-    const txnId   = decoded.data?.merchantTransactionId;
-    if (decoded.code === "PAYMENT_SUCCESS") {
-      const order = await Order.findOneAndUpdate(
-        { phonePeTransactionId: txnId },
-        { paymentStatus:"Paid", status:"Confirmed", paymentId:decoded.data?.transactionId||"" },
-        { new:true }
-      ).catch(() => null);
-      if (order) {
-        Promise.all([
-          sendCustomerEmail({ email:order.email, orderId:order._id, products:order.products||order.items||[], totalAmount:order.totalAmount||order.total_amount, address:order.address, paymentMethod:order.paymentMethod }).catch(()=>{}),
-          sendAdminEmail({    email:order.email, orderId:order._id, products:order.products||order.items||[], totalAmount:order.totalAmount||order.total_amount, address:order.address, paymentMethod:order.paymentMethod }).catch(()=>{}),
-        ]);
-      }
-    } else {
-      await Order.findOneAndUpdate({ phonePeTransactionId:txnId },{ paymentStatus:"Failed", status:"Cancelled" }).catch(()=>{});
-    }
-    res.json({ success:true });
-  } catch (err) {
-    console.error("PhonePe callback error:", err.message);
-    res.status(500).json({ error:err.message });
-  }
-});
-
-app.get("/api/payment/phonepe/status/:merchantTransactionId", async (req, res) => {
-  try {
-    const { merchantTransactionId } = req.params;
-    const path     = `/pg/v1/status/${PHONEPE_MERCHANT_ID}/${merchantTransactionId}`;
-    const checksum = crypto.createHash("sha256")
-      .update(path + PHONEPE_SALT_KEY).digest("hex") + "###" + PHONEPE_SALT_INDEX;
-    const response = await axios.get(`${PHONEPE_HOST}${path}`, {
-      headers: { "Content-Type":"application/json", "X-VERIFY":checksum, "X-MERCHANT-ID":PHONEPE_MERCHANT_ID }
-    });
-    const data = response.data?.data;
-    res.json({ success:response.data?.success, code:response.data?.code, paymentStatus:data?.state, transactionId:data?.transactionId, amount:data?.amount?data.amount/100:0 });
-  } catch (err) {
-    res.status(500).json({ error:err.response?.data?.message || err.message });
   }
 });
 
@@ -793,168 +737,122 @@ app.delete("/api/products/:id", async (req, res) => {
 // ══════════════════════════════════════════════════════
 //  ORDERS
 // ══════════════════════════════════════════════════════
-// ── Create an order (used by the browser AND by the Razorpay webhook) ────────
-// Safe to call twice for the same payment: the second call returns the first order.
-async function finalizeOrder(body, { silent = false } = {}) {
-  const { user_id, email, phone, address, payment_method, paymentMethod,
-          paymentId, paymentStatus, total_amount, totalAmount, products:items,
-          razorpay_order_id } = body;
-  if (!items || items.length === 0) { const e = new Error("No items in order"); e.status = 400; throw e; }
+// Every order — COD, Razorpay from the browser, Razorpay from the webhook,
+// recovered by the reconciler — is created by services/paymentOrders.js, which
+// guarantees one order per checkout and stock reduced at most once.
+// HTTP behaviour lives in services/orderRoutes.js (tested in test/routes.test.js).
+const routes = require("./services/orderRoutes")({ payments, backendUrl: BACKEND_URL });
 
-  await waitForDB();
-  if (paymentId) {
-    const existing = await Order.findOne({ paymentId });
-    if (existing) return { order: existing, duplicate: true };
-  }
-
-  const normalizedItems = items.map(item => ({
-    productId:    item.productId||item._id||"",
-    name:         item.name||"",
-    price:        Number(item.price)||0,
-    quantity:     Number(item.quantity)||1,
-    size:         item.selectedSize||item.size||"",
-    selectedSize: item.selectedSize||item.size||"",
-    color:        item.color||"",
-    image:        item.image||item.images?.[0]||"",
-  }));
-
-  const finalPayMethod = payment_method || paymentMethod || "COD";
-  const finalTotal     = Number(total_amount || totalAmount || 0);
-
-  let order;
-  try {
-    order = await Order.create({
-      user_id:user_id||email, email:email||"guest@gmail.com",
-      phone:phone||address?.phone||"", address:address||{},
-      payment_method:finalPayMethod, paymentMethod:finalPayMethod,
-      razorpay_id: razorpay_order_id || null,
-      paymentId:paymentId||"", paymentStatus:paymentStatus||"Pending",
-      total_amount:finalTotal, totalAmount:finalTotal,
-      items:normalizedItems, products:normalizedItems, status:"Confirmed",
-    });
-  } catch (err) {
-    // browser + webhook raced: the other one won, return its order
-    if (err.code === 11000 && paymentId) {
-      const existing = await Order.findOne({ paymentId });
-      if (existing) return { order: existing, duplicate: true };
-    }
-    throw err;
-  }
-
-  // brand-new order = not yet seen by the admin
-  await Order.collection.updateOne({ _id: order._id }, { $set: { adminViewedAt: null } });
-  console.log("✅ Order saved:", order._id, "| items:", order.products.length);
-  if (!silent) notifyAdminWhatsApp(order);   // fire-and-forget
-
-  // stock reduction must never undo a saved order
-  try {
-    for (const item of normalizedItems) {
-      if (!item.productId) continue;
-      const product = await Product.findById(item.productId).catch(() => null);
-      if (!product) continue;
-
-      const size = item.selectedSize || item.size;
-      let newStock = Math.max(0, Number(product.stock) - item.quantity);
-
-      if (size && product.sizeStock) {
-        const sizeStockObj = product.sizeStock instanceof Map
-          ? Object.fromEntries(product.sizeStock)
-          : (product.sizeStock || {});
-
-        if (sizeStockObj[size] !== undefined) {
-          sizeStockObj[size] = Math.max(0, Number(sizeStockObj[size]) - item.quantity);
-          newStock = Object.values(sizeStockObj).reduce((s,v) => s+Number(v||0), 0);
-          const updatedProduct = await Product.findByIdAndUpdate(item.productId, {
-            sizeStock: sizeStockObj, stock: newStock, soldOut: newStock === 0,
-          }, { new: true });
-          emitStockUpdate(updatedProduct);
-          console.log(`✅ Stock reduced | ${product.name} | size:${size} → ${sizeStockObj[size]} | total:${newStock}`);
-          continue;
-        }
-      }
-
-      const updatedProduct = await Product.findByIdAndUpdate(item.productId, {
-        stock: newStock, soldOut: newStock === 0,
-      }, { new: true });
-      emitStockUpdate(updatedProduct);
-    }
-  } catch (e) { console.error("Stock update failed (order is saved):", e.message); }
-
-  const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
-  if (!silent) {
-    Promise.all([
-      sendCustomerEmail({ email, orderId:order._id, products:normalizedItems, totalAmount:finalTotal, address, paymentMethod:finalPayMethod }).catch(e=>console.error("Customer email:",e.message)),
-      sendAdminEmail({    email, orderId:order._id, products:normalizedItems, totalAmount:finalTotal, address, paymentMethod:finalPayMethod, labelUrl }).catch(e=>console.error("Admin email:",e.message)),
-    ]);
-  }
-  return { order, labelUrl };
-}
-
+// Used by the current Checkout page. COD → saved as Pending (cannot claim "Paid").
+// Razorpay → saved ONLY after the payment is verified with Razorpay.
 app.post("/add-order", async (req, res) => {
-  try {
-    const body = { ...req.body };
-    // if the browser sends Razorpay's signature, check it (never loses the order if it fails)
-    if (body.paymentId && body.razorpay_order_id && body.razorpay_signature && process.env.RAZORPAY_KEY_SECRET) {
-      const expected = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(`${body.razorpay_order_id}|${body.paymentId}`).digest("hex");
-      body.paymentStatus = expected === body.razorpay_signature ? "Paid" : "Check payment";
-    }
-    const { order, labelUrl } = await finalizeOrder(body);
-    // the order is saved, so the cart draft is no longer needed
-    if (body.razorpay_order_id) PendingCheckout.deleteOne({ razorpayOrderId: body.razorpay_order_id }).catch(()=>{});
-    res.status(201).json({ success:true, orderId:order._id, labelUrl: labelUrl || `${BACKEND_URL}/api/orders/${order._id}/shipping-label` });
-  } catch (err) {
-    console.error("Order error:", err);
-    res.status(err.status || 500).json({ error:err.message });
-  }
+  const r = await routes.addOrder(req.body || {});
+  res.status(r.status).json(r.json);
 });
 
-// ── Turn a captured Razorpay payment into an order if none exists ────────────
-async function recoverPayment(pay, { placeholder = false } = {}) {
-  await waitForDB();
-  if (await Order.findOne({ paymentId: pay.id })) return { status: "exists" };
-
-  const pending = await PendingCheckout.findOne({ razorpayOrderId: pay.order_id });
-  if (pending) {
-    const r = await finalizeOrder({
-      ...pending.draft, paymentId: pay.id, razorpay_order_id: pay.order_id, paymentStatus: "Paid",
-    });
-    await PendingCheckout.deleteOne({ _id: pending._id }).catch(()=>{});
-    return { status: "created-from-cart", orderId: r.order._id };
-  }
-  if (!placeholder) return { status: "no-cart-saved" };
-
-  // Old payment, cart unknown: create a visible placeholder so it shows in the admin
-  // dashboard (customer phone/email come from Razorpay) and can be followed up.
-  const amount = Number(pay.amount || 0) / 100;
-  const r = await finalizeOrder({
-    email: pay.email || "guest@gmail.com",
-    phone: pay.contact || "",
-    address: { fullName: "(address unknown — call customer)", phone: String(pay.contact || "").replace(/^\+?91/, "") },
-    paymentMethod: `Razorpay ${pay.method || ""}`.trim(),
-    paymentId: pay.id, razorpay_order_id: pay.order_id, paymentStatus: "Paid",
-    total_amount: amount,
-    products: [{ name: `⚠️ RECOVERED PAYMENT ₹${amount} — items unknown, check Razorpay ${pay.id}`, price: amount, quantity: 1 }],
-  }, { silent: true });
-  return { status: "placeholder-created", orderId: r.order._id };
-}
+// Preferred endpoint after Razorpay checkout succeeds (see frontend/src/utils/razorpayCheckout.js).
+// Safe to call many times — always returns the same order. 202 = paid, not captured yet.
+app.post("/api/payment/confirm", async (req, res) => {
+  const r = await routes.confirm(req.body || {});
+  res.status(r.status).json(r.json);
+});
 
 // Razorpay calls this by itself when a payment succeeds — even if the customer's
-// browser/phone closed. Set it up once in the Razorpay dashboard (see notes).
+// browser/phone closed. It answers 200 only AFTER the order is stored; on any
+// failure it answers 500 so Razorpay retries.
 app.post("/api/payment/razorpay/webhook", async (req, res) => {
-  try {
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    if (!secret) return res.status(500).json({ error: "RAZORPAY_WEBHOOK_SECRET not set" });
-    const expected = crypto.createHmac("sha256", secret).update(req.rawBody || "").digest("hex");
-    if (req.headers["x-razorpay-signature"] !== expected) return res.status(400).json({ error: "Bad signature" });
-    res.json({ received: true });                       // answer fast, work after
+  const r = await payments.handleWebhook({
+    rawBody: req.rawBody, signature: req.headers["x-razorpay-signature"], body: req.body,
+  }).catch((e) => ({ status: 500, json: { error: e.message } }));
+  res.status(r.status).json(r.json);
+});
 
-    const ev  = req.body.event;
-    const pay = req.body.payload?.payment?.entity;
-    if (!["payment.captured", "order.paid"].includes(ev) || !pay) return;
-    const r = await recoverPayment(pay);
-    console.log(`🔔 Razorpay webhook ${ev} | ${pay.id} | ${r.status}`);
-  } catch (e) { console.error("Razorpay webhook error:", e.message); }
+// ── Reconciliation (Razorpay = source of truth for who paid) ──────────────
+// GET  ...?password=&days=30                      → DRY-RUN report, changes nothing
+// POST { password, days, apply:true, includeReview, placeholders, only:[payIds] } → recover
+app.get("/api/admin/razorpay/reconcile", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    res.json(await payments.reconcile({ apply: false, days: Number(req.query.days) || 30, minAgeMinutes: 10 }));
+  } catch (err) { res.status(500).json({ error: err.error?.description || err.message }); }
+});
+app.post("/api/admin/razorpay/reconcile", async (req, res) => {
+  const b = req.body || {};
+  if (b.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  if (b.apply !== true) return res.status(400).json({ error: "Send apply:true to change data. Use GET for a dry run." });
+  try {
+    res.json(await payments.reconcile({
+      apply: true, days: Number(b.days) || 30, minAgeMinutes: 10, source: "recovery-admin",
+      includeReview: !!b.includeReview, placeholders: !!b.placeholders,
+      only: Array.isArray(b.only) && b.only.length ? b.only : null,
+    }));
+  } catch (err) { res.status(500).json({ error: err.error?.description || err.message }); }
+});
+
+// ── Automatic reconciliation every few minutes ────────────────────────────
+// Recovers verified paid checkouts that neither the browser nor the webhook
+// saved, and raises alerts for anything that needs a human.
+const RECONCILE_EVERY_MIN = Number(process.env.RECONCILE_EVERY_MIN) || 5;
+let reconcileRunning = false, lastReconcile = null, reconcileFailures = 0;
+async function autoReconcile(trigger = "timer") {
+  if (reconcileRunning || mongoose.connection.readyState !== 1 || !process.env.RAZORPAY_KEY_SECRET) return lastReconcile;
+  reconcileRunning = true;
+  try {
+    const rep = await payments.reconcile({ apply: true, days: 3, minAgeMinutes: 10, source: "reconcile-auto", silent: false });
+    lastReconcile = { at: rep.ranAt, trigger, paymentsChecked: rep.paymentsChecked, summary: rep.summary };
+    const fixed = rep.rows.filter(r => r.action === "created").length;
+    if (fixed) console.log(`🛟 Auto-reconcile recovered ${fixed} paid order(s)`);
+  } catch (e) {
+    lastReconcile = { at: new Date().toISOString(), trigger, error: e.message };
+    console.error("Auto-reconcile failed:", e.message);
+    reconcileFailures = (reconcileFailures || 0) + 1;
+    if (reconcileFailures === 3) payments.alert("RECONCILE_FAILING", new Date().toISOString().slice(0, 10), `Automatic payment check failed 3 times in a row: ${e.message}`).catch(() => {});
+    return lastReconcile;
+  } finally { reconcileRunning = false; }
+  reconcileFailures = 0;
+  return lastReconcile;
+}
+setTimeout(() => autoReconcile("startup"), 60 * 1000);
+setInterval(() => autoReconcile("timer"), RECONCILE_EVERY_MIN * 60 * 1000);
+
+// Render's free plan sleeps; an external cron (e.g. cron-job.org every 5 min)
+// can call this to wake the server AND run the check.
+app.post("/api/cron/reconcile", async (req, res) => {
+  const key = process.env.CRON_KEY;
+  if (!key || (req.query.key || req.headers["x-cron-key"]) !== key) return res.status(401).json({ error: "Unauthorized" });
+  res.json(await autoReconcile("cron"));
+});
+
+// ── Payment alerts (shown in the Admin Dashboard) ─────────────────────────
+app.get("/api/admin/payment-alerts", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    const filter = req.query.all === "1" ? {} : { resolvedAt: null };
+    res.set("Cache-Control", "no-store");
+    res.json({ alerts: await PaymentAlert.find(filter).sort({ lastSeenAt: -1 }).limit(200).lean(), lastReconcile });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+// Audit trail for one payment / checkout:  ?password=...&paymentId=pay_XXX  (or &razorpayOrderId=order_XXX)
+app.get("/api/admin/payment-events", async (req, res) => {
+  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    const q = {};
+    if (req.query.paymentId) q.paymentId = String(req.query.paymentId);
+    if (req.query.razorpayOrderId) q.razorpayOrderId = String(req.query.razorpayOrderId);
+    res.set("Cache-Control", "no-store");
+    res.json(await PaymentEvent.find(q).sort({ at: Object.keys(q).length ? 1 : -1 }).limit(200).lean());
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.put("/api/admin/payment-alerts/:id/resolve", async (req, res) => {
+  if (req.body?.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await waitForDB();
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "bad id" });
+    await PaymentAlert.updateOne({ _id: req.params.id }, { $set: { resolvedAt: new Date() } });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Read-only health check of the orders collection (no customer details returned).
@@ -964,59 +862,29 @@ app.get("/api/admin/orders/diagnose", async (req, res) => {
   try {
     await waitForDB();
     const col = Order.collection;
-    const [total, byStatus, byPay, noCreatedAt, noEmail, dupPay, latest] = await Promise.all([
+    const [total, byStatus, byPay, noCreatedAt, noEmail, dupPay, latest, pendingOpen, needsReview] = await Promise.all([
       col.countDocuments({}),
       col.aggregate([{ $group:{ _id:"$status", n:{ $sum:1 } } }]).toArray(),
       col.aggregate([{ $group:{ _id:"$paymentStatus", n:{ $sum:1 } } }]).toArray(),
       col.countDocuments({ createdAt: { $exists:false } }),
       col.countDocuments({ $or:[{ email:{ $exists:false } },{ email:"" }] }),
       col.aggregate([{ $match:{ paymentId:{ $gt:"" } } },{ $group:{ _id:"$paymentId", n:{ $sum:1 } } },{ $match:{ n:{ $gt:1 } } }]).toArray(),
-      col.find({}, { projection:{ createdAt:1, status:1, paymentStatus:1, paymentId:1, email:1 } }).sort({ _id:-1 }).limit(15).toArray(),
+      col.find({}, { projection:{ createdAt:1, status:1, paymentStatus:1, paymentId:1, source:1 } }).sort({ createdAt:-1 }).limit(15).toArray(),
+      PendingCheckout.countDocuments({ status: { $ne: "completed" } }),
+      col.countDocuments({ needsReview: { $gt: "" } }),
     ]);
     res.json({
-      totalOrdersInDatabase: total,            // compare with the dashboard's "Total Orders"
-      byStatus: byStatus, byPaymentStatus: byPay,
+      totalOrdersInDatabase: total,
+      byStatus, byPaymentStatus: byPay,
       ordersWithoutCreatedAt: noCreatedAt, ordersWithoutEmail: noEmail,
       duplicatePaymentIds: dupPay.map(d => ({ paymentId: d._id, count: d.n })),
       guestOrders: await col.countDocuments({ email: /^guest@gmail\.com$/i }),
-      latest15: latest.map(o => ({ idSuffix: String(o._id).slice(-6), createdAt: o.createdAt, status: o.status, paymentStatus: o.paymentStatus, hasPaymentId: !!o.paymentId })),
+      ordersNeedingReview: needsReview,
+      openPendingCheckouts: pendingOpen,   // includes carts that were never paid
+      lastReconcile,
+      latest15: latest.map(o => ({ idSuffix: String(o._id).slice(-6), createdAt: o.createdAt, status: o.status, paymentStatus: o.paymentStatus, source: o.source || "", hasPaymentId: !!o.paymentId })),
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Admin tool: finds payments that were taken but have NO order.
-//   GET /api/admin/razorpay/reconcile?password=...&days=30           → just list them
-//   GET /api/admin/razorpay/reconcile?password=...&days=30&recover=1 → also create the orders
-app.get("/api/admin/razorpay/reconcile", async (req, res) => {
-  if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
-  try {
-    await waitForDB();
-    const days = Math.min(Number(req.query.days) || 30, 180);
-    const to = Math.floor(Date.now() / 1000), from = to - days * 86400;
-    const missing = [];
-    let checked = 0;
-    for (let skip = 0; ; skip += 100) {
-      const page  = await razorpay.payments.all({ from, to, count: 100, skip });
-      const items = page.items || [];
-      for (const p of items) {
-        checked++;
-        if (p.status !== "captured" || Number(p.amount_refunded) > 0) continue;
-        if (!(await Order.findOne({ paymentId: p.id }))) missing.push(p);
-      }
-      if (items.length < 100) break;
-    }
-    const out = [];
-    for (const p of missing) {
-      const row = {
-        paymentId: p.id, razorpayOrderId: p.order_id, amountRs: Number(p.amount) / 100,
-        email: p.email, phone: p.contact, method: p.method,
-        paidAt: new Date(p.created_at * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
-      };
-      if (req.query.recover === "1") row.result = await recoverPayment(p, { placeholder: true });
-      out.push(row);
-    }
-    res.json({ days, paymentsChecked: checked, paidButNoOrder: out.length, recovered: req.query.recover === "1", payments: out });
-  } catch (err) { res.status(500).json({ error: err.error?.description || err.message }); }
 });
 
 // A customer's orders: their email (any capitalisation) PLUS
