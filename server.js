@@ -655,7 +655,7 @@ app.post("/api/products", (req, res, next) => {
     if (!name || !price) return res.status(400).json({ error:"Name and price required" });
 
     const getUrl = f => f.path || f.secure_url || ("uploads/" + f.filename);
-    const images = (req.files?.["images"]||[]).map(getUrl).filter(Boolean);
+    const imageKeys = (req.files?.["images"]||[]).map(getUrl).filter(Boolean);   // (not `images`: that name is the S3 helper)
 
     let parsedVariants = [];
     if (colorVariants) {
@@ -663,7 +663,7 @@ app.post("/api/products", (req, res, next) => {
         const vf = req.files?.["variantImages"] || [];
         parsedVariants = JSON.parse(colorVariants).map((v,i) => ({
           name:v.name, stock:Number(v.stock)||10,
-          image:vf[i]?getUrl(vf[i]):(images[0]||""),
+          image:vf[i]?getUrl(vf[i]):(imageKeys[0]||""),
         })).filter(v => v.name.trim() !== "");
       } catch(e) { console.warn("colorVariants parse:", e.message); }
     }
@@ -696,7 +696,7 @@ app.post("/api/products", (req, res, next) => {
       categoryId: categoryId || undefined,
       stock:totalStock,
       soldOut:totalStock===0,
-      images,
+      images: imageKeys,
       sizeStock: parsedSizeStock,
     });
 
