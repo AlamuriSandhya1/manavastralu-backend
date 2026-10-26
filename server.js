@@ -19,6 +19,9 @@ const http       = require("http");
 const https      = require("https");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { createS3Images, createS3Upload } = require("./services/s3Images");
 const Razorpay   = require("razorpay"); // npm i razorpay
 const compression = require("compression");  // npm i compression
 const { initSocket, emitStockUpdate: _emitStockUpdate } = require("./socket"); // npm i socket.io
@@ -43,7 +46,12 @@ const clearProductCache = () => {
   storefrontCache = null;
   setImmediate(() => { buildStorefront().catch(() => {}); });   // rebuild before the next visitor asks
 };
-const emitStockUpdate   = (p) => { clearProductCache(); return _emitStockUpdate(p); };
+const emitStockUpdate   = (p) => {
+  clearProductCache();
+  if (!p) return _emitStockUpdate(p);
+  // live updates carry displayable (presigned) image URLs, never raw S3 keys
+  images.signProduct(p).then(_emitStockUpdate, () => _emitStockUpdate(p));
+};
 
 // "in_stock" | "low_stock" | "sold_out" — sent with every product so the
 // storefront can show availability without recalculating it
@@ -74,11 +82,11 @@ function buildStorefront() {
     });
 
     const body = JSON.stringify({
-      categories: cats.map((c) => {
+      categories: await images.signAll(cats.map((c) => {
         const n = counts.get(String(c._id)) || 0;
         return { ...c, productCount: n, category: c.name, count: n };
-      }),
-      products: prods.map((p) => ({ ...p, availability: availabilityOf(p) })),
+      }), images.signCategory),
+      products: await images.signAll(prods.map((p) => ({ ...p, availability: availabilityOf(p) })), images.signProduct),
     });
     storefrontCache = { at: Date.now(), body };
     return storefrontCache;
@@ -132,7 +140,29 @@ const cloudStorage = new CloudinaryStorage({
     transformation:  [{ width:800, height:1000, crop:"limit", quality:"auto" }],
   },
 });
-const upload = multer({ storage: cloudStorage });
+
+// ── AWS S3 (private bucket) ───────────────────────────
+// Credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (read by the SDK
+// itself — never logged). MongoDB stores object keys; responses get presigned URLs.
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+const images = createS3Images({
+  s3, PutObjectCommand, GetObjectCommand, getSignedUrl,
+  bucket:    process.env.S3_BUCKET_NAME,
+  region:    process.env.AWS_REGION,
+  prefix:    process.env.S3_KEY_PREFIX || "mana-vastralu",
+  expiresIn: Number(process.env.S3_SIGNED_URL_EXPIRES) || 3600,
+});
+// IMAGE_STORAGE=s3 (default) → new uploads go to S3.  IMAGE_STORAGE=cloudinary → old behaviour.
+const IMAGE_STORAGE = (process.env.IMAGE_STORAGE || "s3").toLowerCase();
+const upload = IMAGE_STORAGE === "cloudinary"
+  ? multer({ storage: cloudStorage })
+  : createS3Upload({
+      multer, images,
+      kindFor: (req) => (String(req.originalUrl).includes("/categories") ? "categories" : "products"),
+      // nothing reaches S3 without the admin password (body or query, like other admin routes)
+      isAuthorized: (req) => ((req.body && req.body.password) || req.query.password) === ADMIN_PASS,
+    });
+console.log(`🖼️  Image uploads → ${IMAGE_STORAGE}${IMAGE_STORAGE === "s3" ? (images.configured() ? ` (bucket ${process.env.S3_BUCKET_NAME})` : " ⚠️ S3_BUCKET_NAME / AWS_REGION NOT SET") : ""}`);
 
 // ══════════════════════════════════════════════════════
 //  MONGODB — single connection, single reconnect path
@@ -285,8 +315,10 @@ const createPaymentOrders = require("./services/paymentOrders");
 const { withRetry }      = createPaymentOrders;
 const makeAlertEmail     = require("./services/alertEmail");
 
-const notifyNewOrder = (order) => {
-  const products = order.products || [];
+const notifyNewOrder = async (order) => {
+  // e-mails show product photos for up to 7 days (signed URLs cannot last longer)
+  const signed = await images.signOrder(order, { expires: 7 * 24 * 3600 }).catch(() => order);
+  const products = signed.products || order.products || [];
   const total    = order.totalAmount || order.total_amount;
   const payMethod = order.paymentMethod || order.payment_method;
   const labelUrl = `${BACKEND_URL}/api/orders/${order._id}/shipping-label`;
@@ -369,6 +401,7 @@ app.get("/api/health", (req, res) =>
     mongo: mongoose.connection.readyState === 1 ? "connected" : "not connected",
     razorpayMode: String(process.env.RAZORPAY_KEY_ID || "").startsWith("rzp_live_") ? "live" : (process.env.RAZORPAY_KEY_ID ? "test" : "not set"),
     webhookSecretSet: !!process.env.RAZORPAY_WEBHOOK_SECRET,
+    imageStorage: IMAGE_STORAGE, s3Configured: images.configured(),
   })
 );
 app.get("/api/orders/:id/shipping-label", async (req, res) => {
@@ -392,7 +425,7 @@ app.post("/api/payment/create-order", async (req, res) => {
       return res.status(500).json({ message: "Razorpay keys not configured in .env" });
 
     const amountInPaise = Math.round(Number(amount) * 100);
-    const d = draft && typeof draft === "object" ? draft : null;
+    const d = draft && typeof draft === "object" ? images.sanitizeDeep(draft) : null;   // keys, never signed URLs
     const a = d?.address || {};
 
     const order = await withRetry(() => razorpay.orders.create({
@@ -569,7 +602,7 @@ app.get("/api/products", async (req, res) => {
     }
     let q = Product.find(filter).sort({ createdAt:-1 }).lean();   // lean = plain objects, much faster
     if (view === "card") q = q.select("-description");
-    const list = (await q).map(p => ({ ...p, availability: availabilityOf(p) }));
+    const list = await images.signAll((await q).map(p => ({ ...p, availability: availabilityOf(p) })), images.signProduct);
 
     const body = JSON.stringify(list);
     if (productListCache.size > 50) productListCache.clear();    // never let it grow unbounded
@@ -581,7 +614,7 @@ app.get("/api/products", async (req, res) => {
 // NEW: categories are now real database records (see routes/categories.js).
 // This replaces the old /api/categories that grouped products by name.
 app.use(require("./routes/categories")({
-  upload, adminPass: ADMIN_PASS, waitForDB, Product,
+  upload, adminPass: ADMIN_PASS, waitForDB, Product, images,
   onChange: clearProductCache,            // categories changed → refresh the storefront snapshot
 }));
 
@@ -592,7 +625,7 @@ app.get("/api/storefront", async (req, res) => {
   try {
     res.set("Cache-Control", "public, max-age=10, stale-while-revalidate=120");
     let hit = storefrontCache;
-    if (hit) {
+    if (hit && Date.now() - hit.at < images.maxResponseAgeMs()) {   // never serve expired image links
       if (Date.now() - hit.at > STOREFRONT_TTL) buildStorefront().catch(() => {});
       return res.type("application/json").send(hit.body);
     }
@@ -606,13 +639,13 @@ app.get("/api/products/:id", async (req, res) => {
     const p = await Product.findById(req.params.id).lean();
     if (!p) return res.status(404).json({ error:"Not found" });
     res.set("Cache-Control", "no-cache");
-    res.json({ ...p, availability: availabilityOf(p) });
+    res.json(await images.signProduct({ ...p, availability: availabilityOf(p) }));
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
 app.post("/api/products", (req, res, next) => {
   upload.fields([{ name:"images", maxCount:4 },{ name:"variantImages", maxCount:20 }])(req, res, err => {
-    if (err) return res.status(500).json({ error:"Upload failed: " + err.message });
+    if (err) return res.status(err.status || 500).json({ error:"Upload failed: " + err.message });
     next();
   });
 }, syncProductCategory, async (req, res) => {
@@ -669,7 +702,7 @@ app.post("/api/products", (req, res, next) => {
 
     console.log("✅ Product created:", product._id, "| sizeStock:", parsedSizeStock);
     emitStockUpdate(product);
-    res.json(product);
+    res.json(await images.signProduct(product));
   } catch (err) {
     console.error("Product create error:", err.message);
     res.status(500).json({ error:err.message });
@@ -708,16 +741,16 @@ app.put("/api/products/:id", syncProductCategory, async (req, res) => {
     product.stock         = totalStock;
     product.soldOut       = totalStock === 0;
     product.sizeStock     = parsedSizeStock;
-    product.colorVariants = typeof colorVariants === "string"
+    product.colorVariants = images.sanitizeDeep(typeof colorVariants === "string"
       ? JSON.parse(colorVariants)
-      : (colorVariants || []);
+      : (colorVariants || []));      // a signed URL sent back by the browser is stored as its S3 key
 
     product.markModified("sizeStock");
 
     const updated = await product.save();
     console.log("✅ Product updated:", req.params.id, "| totalStock:", updated.stock);
     emitStockUpdate(updated);
-    res.json(updated);
+    res.json(await images.signProduct(updated));
   } catch (err) {
     console.error("❌ Product update error:", err.message);
     res.status(500).json({ error: err.message });
@@ -746,14 +779,14 @@ const routes = require("./services/orderRoutes")({ payments, backendUrl: BACKEND
 // Used by the current Checkout page. COD → saved as Pending (cannot claim "Paid").
 // Razorpay → saved ONLY after the payment is verified with Razorpay.
 app.post("/add-order", async (req, res) => {
-  const r = await routes.addOrder(req.body || {});
+  const r = await routes.addOrder(images.sanitizeDeep(req.body || {}));
   res.status(r.status).json(r.json);
 });
 
 // Preferred endpoint after Razorpay checkout succeeds (see frontend/src/utils/razorpayCheckout.js).
 // Safe to call many times — always returns the same order. 202 = paid, not captured yet.
 app.post("/api/payment/confirm", async (req, res) => {
-  const r = await routes.confirm(req.body || {});
+  const r = await routes.confirm(images.sanitizeDeep(req.body || {}));
   res.status(r.status).json(r.json);
 });
 
@@ -909,7 +942,7 @@ const myOrders = async (req, res) => {
       or.push({ email: /^guest@gmail\.com$/i, $or: [{ "address.phone": { $in: variants } }, { phone: { $in: variants } }] });
     }
     if (!or.length) return res.json([]);
-    res.json(await Order.find({ $or: or }).sort({ createdAt: -1 }).lean());
+    res.json(await images.signAll(await Order.find({ $or: or }).sort({ createdAt: -1 }).lean(), images.signOrder));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 app.get("/my-orders/:email", myOrders);
@@ -930,7 +963,7 @@ app.get("/api/admin/products", async (req, res) => {
   if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
   try {
     await waitForDB();
-    res.json(await Product.find().sort({ createdAt:-1 }));
+    res.json(await images.signAll(await Product.find().sort({ createdAt:-1 }), images.signProduct));
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 
@@ -972,7 +1005,7 @@ app.get("/api/admin/orders", async (req, res) => {
   if (req.query.password !== ADMIN_PASS) return res.status(401).json({ error:"Unauthorized" });
   try {
     await waitForDB();
-    res.json(await Order.find().sort({ createdAt:-1 }).lean());   // lean keeps adminViewedAt
+    res.json(await images.signAll(await Order.find().sort({ createdAt:-1 }).lean(), images.signOrder));   // lean keeps adminViewedAt
   } catch (err) { res.status(500).json({ error:err.message }); }
 });
 

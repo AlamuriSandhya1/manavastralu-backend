@@ -8,8 +8,13 @@
 const express = require("express");
 const Category = require("../models/Category");
 
-module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product, onChange }) {
+module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product, onChange, images }) {
   const router = express.Router();
+
+  // S3 image keys → temporary presigned URLs in responses (other values unchanged)
+  const showCat   = (c) => (images ? images.signCategory(c) : c);
+  const showCats  = (l) => (images ? images.signAll(l, images.signCategory) : l);
+  const showProds = (l) => (images ? images.signAll(l, images.signProduct) : l);
 
   /* ───────── helpers ───────── */
   const slugify = (s = "") =>
@@ -36,7 +41,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
   // wraps multer so an upload error becomes a clean JSON message
   const uploadImage = (req, res, next) =>
     upload.single("image")(req, res, (err) => {
-      if (err) return res.status(500).json({ error: "Image upload failed: " + err.message });
+      if (err) return res.status(err.status || 500).json({ error: "Image upload failed: " + err.message });
       next();
     });
 
@@ -78,7 +83,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
         category: c.name,        // legacy aliases, so older pages reading
         count: c.productCount,   // {category, count} keep working
       }));
-      res.json(out);
+      res.json(await showCats(out));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -90,7 +95,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
       const cat = await findActive(req.params.slug);
       if (!cat) return res.status(404).json({ error: "Category not found" });
       const [withCount] = await withCounts([cat]);
-      res.json(withCount);
+      res.json(await showCat(withCount));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -106,11 +111,11 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
         .sort({ createdAt: -1 })
         .select("-description")
         .lean();
-      res.json(list.map((p) => {
+      res.json(await showProds(list.map((p) => {
         const stock = Number(p.stock) || 0;
         const availability = p.soldOut || stock <= 0 ? "sold_out" : stock <= 3 ? "low_stock" : "in_stock";
         return { ...p, availability };
-      }));
+      })));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -123,7 +128,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
     try {
       await waitForDB();
       const cats = await Category.find().sort({ sortOrder: 1, name: 1 }).lean();
-      res.json(await withCounts(cats));
+      res.json(await showCats(await withCounts(cats)));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -153,7 +158,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
         sortOrder,
       });
       onChange && onChange();
-      res.status(201).json({ ...doc.toObject(), productCount: 0 });
+      res.status(201).json(await showCat({ ...doc.toObject(), productCount: 0 }));
     } catch (err) {
       if (err.code === 11000) return res.status(409).json({ error: "A category with this name or slug already exists" });
       res.status(500).json({ error: err.message });
@@ -194,7 +199,7 @@ module.exports = function categoryRoutes({ upload, adminPass, waitForDB, Product
 
       onChange && onChange();
       const [withCount] = await withCounts([cat.toObject()]);
-      res.json(withCount);
+      res.json(await showCat(withCount));
     } catch (err) {
       if (err.code === 11000) return res.status(409).json({ error: "A category with this name or slug already exists" });
       res.status(500).json({ error: err.message });
